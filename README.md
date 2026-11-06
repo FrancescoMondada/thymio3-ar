@@ -96,6 +96,16 @@ détecteur sur 1 s suppose que chaque LED reste sur son pixel pendant une second
 (il s'effondre dès 2 diamètres de LED par seconde, soit environ 13 px/s en 480 px). D'où : la **différence de deux images**
 par défaut, et le **filtre d'alignement** (idée de l'utilisateur) avec 4 LED alignées. **Pas encore réessayé sur le téléphone.**
 
+**Troisième essai** (2026-11-06, 21h34, version 487fb51 : différence de deux images, 4 LED alignées « avant A », 2,5 Hz,
+480 px, téléphone tenu à la main et incliné de 15° à 90°) : **les 4 LED sont retrouvées dans environ 94 % des 1571 images
+(une minute)**. Par angle de vue : 75–90° 100 % (17 images), 60–75° 95 % (657), 45–60° 90 % (616), 30–45° 98 % (275), 15–30°
+100 % (6), 0–15° pas essayé. Au dernier instant : 8 points trouvés, 4 retenus par le filtre d'alignement (droite à −48°,
+intervalles 26/23/22 px). Cadence : 30 images reçues, 24,3 analysées par seconde (9,7 par période de clignotement) ; réponse
+maximale 159 sur 255 (seuil 50). Temps par image : lecture 31,6 ms, recherche 5,3 ms : **la lecture de l'image de la caméra
+(le même 31 ms qu'à 720×1280 : indépendant de la taille analysée) plafonne la cadence à environ 27 images par seconde**.
+Ce que ce rapport ne dit pas : si les 4 points retenus sont bien les 4 LED allumées et non 4 parasites alignés (seul l'écran
+le montre) ; où sont les 6 % d'images perdues ; ce qui se passe de côté (0–15°).
+
 Mesuré sur des **vidéos synthétiques** (pas sur un robot) :
 - par luminosité : sur la première photo (tout allumé), le nombre de points verts va de 12 à 22 selon le contraste et la
   résolution : **pas robuste**, d'autant que les photos propres donnent de nombreux points parasites (reflets, lueurs) ;
@@ -116,7 +126,7 @@ Mesuré sur des **vidéos synthétiques** (pas sur un robot) :
   toutes les 90 ms, toutes les images sont gardées).
 - scène simulée par luminosité (géométrie seule, 380 mm) : 16 points sur 16 jusqu'à 30°, dans 8 % des images à 20°, aucun à 10°.
 
-**Jamais essayé** : la différence de deux images et le filtre d'alignement sur un téléphone ou une tablette ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
+**Jamais essayé** : les angles de 0 à 15° ; une tablette ; l'autre rangée et l'autre groupe ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
 appels sont ceux de `thymio3-cards/src/py/lights.py`, qui ont tourné sur un vrai robot) ; la régularité réelle du clignotement
 (`time.sleep_ms` en MicroPython) ; l'effet de l'exposition automatique et de l'obturateur à balayage sur des LED qui clignotent ;
 la détection par clignotement sur une vraie photo ou vidéo (il faut une paire éteintes/allumées, ou la page sur téléphone).
