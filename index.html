@@ -39,7 +39,7 @@
       button:disabled { opacity: 0.45; cursor: default; }
       button.on { background: var(--ok); border-color: var(--ok); color: #05150d; }
       select, input[type='range'] { font: inherit; }
-      select { min-height: 40px; border-radius: 8px; background: #1d2540; color: var(--text); border: 1px solid var(--line); padding: 0 8px; }
+      select { max-width: 100%; min-height: 40px; border-radius: 8px; background: #1d2540; color: var(--text); border: 1px solid var(--line); padding: 0 8px; }
       input[type='range'] { width: 100%; accent-color: var(--accent); min-height: 32px; }
       label { display: flex; align-items: center; gap: 8px; min-height: 36px; }
       .big { font-size: 40px; font-weight: 800; line-height: 1.1; }
@@ -59,7 +59,7 @@
         <canvas id="view" width="640" height="360"></canvas>
         <div id="splash">
           <h1>Test : retrouver les LED du Thymio avec la caméra</h1>
-          <p>Posez le robot sur la table, ses 16 LED du dessus allumées au maximum (le bouton « Robot » plus bas les fait clignoter). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
+          <p>Posez le robot sur la table, quelques LED du dessus qui clignotent (le bouton « Robot » plus bas les fait clignoter : un quart des 16, bien séparées, car côte à côte elles se confondent). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
           <div class="row">
             <button class="primary" id="startBack">Caméra arrière</button>
             <button id="startFront">Caméra avant</button>
@@ -72,7 +72,7 @@
         <section>
           <h2>Points lumineux</h2>
           <div class="big" id="count">–</div>
-          <div class="note" id="countNote">Il doit y en avoir 16 (2 rangées de 8).</div>
+          <div class="note" id="countNote">–</div>
         </section>
         <section>
           <h2>Vu de côté ?</h2>
@@ -102,12 +102,12 @@
             </select>
           </label>
           <p class="note" id="detectNote" style="margin:0 0 4px"></p>
-          <label>Largeur analysée
-            <select id="procWidth">
+          <label>Taille analysée (côté long)
+            <select id="procSize">
               <option value="320">320 px</option>
-              <option value="640" selected>640 px</option>
+              <option value="480" selected>480 px</option>
+              <option value="640">640 px</option>
               <option value="960">960 px</option>
-              <option value="1280">1280 px</option>
             </select>
           </label>
           <div data-for="blink">
@@ -119,7 +119,7 @@
             </label>
             <label for="blinkThreshold" style="min-height:0">Seuil de clignotement : <b id="blinkThresholdValue">50</b> <span class="dim">(réponse max vue : <span id="ampMax">–</span>)</span></label>
             <input id="blinkThreshold" type="range" min="15" max="150" value="50" />
-            <p class="note" style="margin:0 0 4px">Un point compte s'il s'allume et s'éteint au rythme du robot (fenêtre de 12 images, 0,4 s). Tout ce qui est fixe, même très brillant, est ignoré.</p>
+            <p class="note" style="margin:0 0 4px">Un point compte s'il s'allume et s'éteint au rythme du robot (fenêtre de 2,5 périodes). Tout ce qui est fixe, même très brillant, est ignoré.</p>
           </div>
           <div data-for="bright">
           <label>Points comptés
@@ -151,9 +151,26 @@
           <h2>Robot</h2>
           <label>LED du dessus
             <select id="ledMode">
-              <option value="blink" selected>clignotantes (7,5 Hz)</option>
+              <option value="blink" selected>clignotantes</option>
               <option value="on">allumées en continu</option>
               <option value="off">éteintes</option>
+            </select>
+          </label>
+          <label>Lesquelles
+            <select id="ledGroup">
+              <option value="0" selected>quart 1 (4 LED écartées)</option>
+              <option value="1">quart 2 (4 LED écartées)</option>
+              <option value="2">quart 3 (4 LED écartées)</option>
+              <option value="3">quart 4 (4 LED écartées)</option>
+              <option value="-1">les 16</option>
+            </select>
+          </label>
+          <label>Vitesse
+            <select id="blinkSpeed">
+              <option value="400">lente : 1,25 Hz</option>
+              <option value="200" selected>2,5 Hz</option>
+              <option value="100">5 Hz</option>
+              <option value="67">rapide : 7,5 Hz</option>
             </select>
           </label>
           <button id="robot" style="width:100%">Connecter le robot et lancer</button>

@@ -26,16 +26,26 @@
 // gives (or the one the page saw it), in ms.
 
 export class LockIn {
-  constructor({ hz, frames = 12, detrend = true } = {}) {
+  // Two ways to say how many pictures are looked at: `frames` (always the last K pictures: simple, for a camera whose
+  // rate is known) or `windowMs` (the pictures of the last `windowMs`, but at least `minFrames` and at most
+  // `maxFrames`: what the page uses, because a phone gives anything from 5 to 30 pictures a second). `computeEvery`
+  // (ms): do the sums at most that often; the pictures are kept all the same.
+  constructor({ hz, frames = 12, windowMs = 0, minFrames = 8, maxFrames = 64, computeEvery = 0, detrend = true } = {}) {
     this.hz = hz;
     this.detrend = detrend;
-    this.K = frames;
+    this.windowMs = windowMs;
+    this.minFrames = minFrames;
+    this.cap = windowMs ? maxFrames : frames;     // how many pictures are kept
+    this.K = windowMs ? 0 : frames;               // how many are in the sums now (in window mode: at the last sums)
+    this.computeEvery = computeEvery;
     this.w = 0;
     this.h = 0;
-    this.ring = [];                       // the last K pictures, as three planes (R, G, B) of one byte per pixel
-    this.times = new Array(frames).fill(0);
+    this.ring = [];                       // the last pictures, as three planes (R, G, B) of one byte per pixel, made when first needed
+    this.times = new Array(this.cap).fill(0);
     this.head = 0;                        // where the next picture goes
     this.count = 0;
+    this.ready = false;                   // the sums have been done since the last reset
+    this.tComputed = -Infinity;
     this.amp = null;                      // the amplitude image, 0..255: any change at the blink rhythm
     this.chroma = null;                   // the same for the greenness G - (R + B) / 2
     this.accI = null;                     // I and Q of the three channels, one plane each
@@ -46,9 +56,10 @@ export class LockIn {
     if (w === this.w && h === this.h) return;
     this.w = w;
     this.h = h;
-    this.ring = Array.from({ length: this.K }, () => new Uint8Array(3 * w * h));
+    this.ring = new Array(this.cap).fill(null);
     this.head = 0;
     this.count = 0;
+    this.ready = false;
     this.amp = new Uint8Array(w * h);
     this.chroma = new Uint8Array(w * h);
     this.accI = new Float32Array(3 * w * h);
@@ -58,47 +69,76 @@ export class LockIn {
   reset() {
     this.count = 0;
     this.head = 0;
+    this.ready = false;
+    this.tComputed = -Infinity;
   }
 
-  // Adds a picture (RGBA) taken at tMs. -> true when `amp` is up to date (K pictures are in), false before.
+  // The pictures the sums are made of, as places in the ring; null when there are not enough yet.
+  windowSlots() {
+    const cap = this.cap;
+    if (!this.windowMs) {
+      if (this.count < cap) return null;
+      return Array.from({ length: cap }, (_, k) => k);                  // order does not matter: each place has its own time
+    }
+    if (this.count < this.minFrames) return null;
+    const newest = (this.head + cap - 1) % cap, tNew = this.times[newest];
+    const slots = [];
+    for (let i = 0; i < this.count; i++) {
+      const slot = (this.head - 1 - i + 2 * cap) % cap;
+      if (slots.length >= this.minFrames && tNew - this.times[slot] > this.windowMs) break;
+      slots.push(slot);
+    }
+    const span = tNew - this.times[slots[slots.length - 1]];
+    // a window that does not yet reach 80 % of its length (just started) is not a window
+    return slots.length >= this.minFrames && (span >= 0.8 * this.windowMs || slots.length >= cap) ? slots : null;
+  }
+
+  // Adds a picture (RGBA) taken at tMs. -> true when `amp` and `chroma` were just made up to date from it, false when
+  // not (not enough pictures yet, or the sums were done less than `computeEvery` ms ago: `ready` tells whether older
+  // ones exist).
   push(rgba, w, h, tMs) {
     this.resize(w, h);
     // a long gap (the page was hidden, the camera stalled) leaves nothing to compare with: start again
     if (this.count > 0) {
-      const last = this.times[(this.head + this.K - 1) % this.K];
-      if (tMs - last > 1000 || tMs < last) this.count = 0;
+      const last = this.times[(this.head + this.cap - 1) % this.cap];
+      if (tMs - last > 1000 || tMs < last) this.reset();
     }
-    const plane = this.ring[this.head];
     const n = w * h;
+    const plane = this.ring[this.head] || (this.ring[this.head] = new Uint8Array(3 * n));
     for (let i = 0, j = 0; i < n; i++, j += 4) {
       plane[i] = rgba[j];
       plane[n + i] = rgba[j + 1];
       plane[2 * n + i] = rgba[j + 2];
     }
     this.times[this.head] = tMs;
-    this.head = (this.head + 1) % this.K;
-    if (this.count < this.K) this.count++;
-    if (this.count < this.K) return false;
-    this.compute();
+    this.head = (this.head + 1) % this.cap;
+    if (this.count < this.cap) this.count++;
+    const slots = this.windowSlots();
+    if (!slots) return false;
+    if (this.computeEvery && tMs - this.tComputed < this.computeEvery) return false;
+    this.compute(slots);
+    this.tComputed = tMs;
+    this.ready = true;
     return true;
   }
 
-  // The weights of the K pictures in the window, in ring order: cos and sin of the blink, with whatever is steady
+  // The weights of the pictures in the window, in the order of `slots`: cos and sin of the blink, with whatever is steady
   // or a steady slope in time taken out of them (least squares against 1 and t), so that a pixel that is steady, or
   // that changes slowly and steadily (an edge that slides across it because the hand moves), gives exactly 0. They are
   // scaled so that a sine of amplitude `a` at the blink frequency gives I = a cos(phase) and Q = a sin(phase).
-  weights() {
-    const K = this.K;
+  weights(slots) {
+    const K = slots.length;
+    const at = (k) => this.times[slots[k]] / 1000;
     const t = new Float64Array(K);
     let tm = 0;
-    for (let k = 0; k < K; k++) { t[k] = this.times[k] / 1000; tm += t[k]; }
+    for (let k = 0; k < K; k++) { t[k] = at(k); tm += t[k]; }
     tm /= K;
     let stt = 0;
     for (let k = 0; k < K; k++) { t[k] -= tm; stt += t[k] * t[k]; }
     const raw = (fn) => {
       const w = new Float64Array(K);
       let m = 0;
-      for (let k = 0; k < K; k++) { w[k] = fn(2 * Math.PI * this.hz * (this.times[k] / 1000)); m += w[k]; }
+      for (let k = 0; k < K; k++) { w[k] = fn(2 * Math.PI * this.hz * at(k)); m += w[k]; }
       m /= K;
       let sw = 0;
       for (let k = 0; k < K; k++) { w[k] -= m; sw += w[k] * t[k]; }
@@ -109,7 +149,7 @@ export class LockIn {
     const wc = raw(Math.cos), ws = raw(Math.sin);
     let nc = 0, ns = 0;
     for (let k = 0; k < K; k++) {
-      const theta = 2 * Math.PI * this.hz * (this.times[k] / 1000);
+      const theta = 2 * Math.PI * this.hz * at(k);
       nc += wc[k] * Math.cos(theta);
       ns += ws[k] * Math.sin(theta);
     }
@@ -117,16 +157,19 @@ export class LockIn {
     return { wc: Float32Array.from(wc, (x) => x * fc), ws: Float32Array.from(ws, (x) => x * fs) };
   }
 
-  compute() {
-    const { K, ring, accI, accQ, amp, chroma } = this;
+  compute(slots = this.windowSlots()) {
+    if (!slots) return;
+    const { ring, accI, accQ, amp, chroma } = this;
+    const K = slots.length;
+    this.K = K;
     const n = this.w * this.h;
-    const { wc, ws } = this.weights();
+    const { wc, ws } = this.weights(slots);
     accI.fill(0);
     accQ.fill(0);
     for (let c = 0; c < 3; c++) {
       const base = c * n;
       for (let k = 0; k < K; k++) {
-        const v = ring[k], wk = wc[k], sk = ws[k];
+        const v = ring[slots[k]], wk = wc[k], sk = ws[k];
         for (let i = 0; i < n; i++) {
           const x = v[base + i];
           accI[base + i] += wk * x;

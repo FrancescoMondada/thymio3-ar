@@ -12,7 +12,7 @@
 // robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles.
 
 import { fromStream } from './camera.js';
-import { HALF_MS } from './script.js';
+import { HALF_MS, groupMembers } from './script.js';
 
 export const DEMO_W = 1280;
 export const DEMO_H = 720;
@@ -61,7 +61,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, halfMs = () => HALF_MS, group = () => -1 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -114,8 +114,10 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     poly(body.map((p) => project(cam, p)), '#d9dde3');
     poly(pad.map((p) => project(cam, p)), '#b8bec8');
     // the 16 LEDs: green with a white-hot core, about 5 mm across, as seen from every side, steady or blinking
-    const lit = !blink || Math.floor((t * 1000) / HALF_MS) % 2 === 0;
-    if (lit) for (const p of leds) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
+    const lit = !blink || Math.floor((t * 1000) / halfMs()) % 2 === 0;
+    // the LEDs of the group the page asked the (simulated) robot for: leds[] is the front row (0..7) and then the back row
+    const driven = new Set(groupMembers(group()).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
+    if (lit) for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
     if (extra) {
       // steady lights that are not the 16: a blue one at the front, a red glow low at the back, the ring round the pad
       glow(project(cam, [0, 54, 0]), 3.5, ['rgb(255,255,255)', 'rgb(120,170,255)', 'rgb(40,80,255)', 'rgba(30,60,255,0)']);

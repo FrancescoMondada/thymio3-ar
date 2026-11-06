@@ -11,14 +11,21 @@
 # a software PWM at 50 Hz in 16 steps: 15 is dark for 1/16 of every 20 ms, 16 never is. A camera with a short
 # exposure can catch the dark moment, so this script uses 16, or 0: never anything in between.
 #
-# "blink": all 16 LEDs on for HALF_MS, off for HALF_MS, and so on. The page looks for a pixel that does this
+# GROUP: which LEDs the mode drives. -1: all 16. 0..3: only a quarter, 4 LEDs (2 in the front row, 2 in the back
+# row) at least 18 mm apart, because at 8 mm (neighbours) a phone camera cannot tell the LEDs from each other: their
+# glows run together. Front LED i belongs to quarter i % 4, back LED i to quarter (i + 2) % 4 - SO THAT, IF THE
+# INDEX RUNS THE SAME WAY ALONG BOTH ROWS, the four are on a lattice of 16 mm x 16 mm (front columns g and g + 4,
+# back columns g + 2 and g + 6). The four quarters together are the 16 LEDs. The LEDs not in the group stay dark.
+#
+# "blink": the LEDs of the group on for HALF_MS, off for HALF_MS, and so on. The page looks for a pixel that does this
 # (lockin.js); HALF_MS must be the same there (src/script.js: tests/script.test.js checks it). The beat is kept
 # against the clock of the robot, not by adding sleeps, so that it does not drift.
 import thymio
 import time
 
 MODE = "on"
-HALF_MS = 67            # 7.46 Hz: a camera at 30 pictures a second sees about 2 on, 2 off
+GROUP = -1
+HALF_MS = 200           # 2.5 Hz: a camera at 30 pictures a second sees about 6 on, 6 off (the page writes its choice here)
 
 beh = thymio.BEHAVIORS()
 beh.disable_behaviors()
@@ -28,8 +35,8 @@ back = [thymio.LEDS_LEGO_BACK(i) for i in range(8)]
 
 def show(level):
     for i in range(8):
-        front[i].intensity(level)
-        back[i].intensity(level)
+        front[i].intensity(level if GROUP < 0 or i % 4 == GROUP else 0)
+        back[i].intensity(level if GROUP < 0 or i % 4 == (GROUP + 2) % 4 else 0)
 
 
 if MODE == "blink":

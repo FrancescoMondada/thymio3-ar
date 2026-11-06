@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LockIn } from '../src/lockin.js';
 import { SpotFinder } from '../src/detect.js';
-import { BLINK_HZ } from '../src/script.js';
+import { BLINK_HZ, HALF_MS, windowOf } from '../src/script.js';
+
+const WINDOW = windowOf(HALF_MS);              // ms: 2.5 periods of the blink
 
 // A synthetic video of the robot seen from above: a dark textured table, a white body under the LEDs (steady and
 // bright), the 16 green LEDs in two rows of 8 (blinking, or not), and steady lights of other colours (the ring,
@@ -59,9 +61,9 @@ function times(count, { fps = 30, jitter = 0, drop = 0, t0 = 1000, rnd }) {
 }
 
 // runs the video through the lock-in and the spot finder; -> the spots found in the last picture, and the finder result
-function run({ hz = BLINK_HZ, blinkHz = BLINK_HZ, phase = 0, blink = true, count = 32, threshold = 40, tOpts = {}, picture = {}, seed = 7, frames = 12, signal = 'amp' }) {
+function run({ hz = BLINK_HZ, blinkHz = BLINK_HZ, phase = 0, blink = true, count = 48, threshold = 40, tOpts = {}, picture = {}, seed = 7, windowMs = WINDOW, signal = 'amp' }) {
   const rnd = rng(seed);
-  const lock = new LockIn({ hz, frames });
+  const lock = new LockIn({ hz, windowMs });
   const finder = new SpotFinder();
   let res = null, ready = false;
   for (const t of times(count, { ...tOpts, rnd })) {
@@ -96,7 +98,7 @@ test('pictures that are late, early or missing do not matter (the weights use th
 
 test('a camera at 24 or at 60 pictures a second works as well', () => {
   for (const fps of [24, 60]) {
-    const { res } = run({ count: 96, tOpts: { fps, jitter: 2 }, frames: fps === 60 ? 24 : 12 });
+    const { res } = run({ count: 2 * fps, tOpts: { fps, jitter: 2 } });
     assert.equal(res.spots.length, 16, `${fps} fps`);
   }
 });
@@ -113,12 +115,25 @@ test('LEDs that do not blink are not found (the robot must blink)', () => {
   assert.equal(res.spots.length, 0);
 });
 
-test('something that pulses slowly, at 1 or 2 Hz (the firmware\'s breathing lights), is not found', () => {
-  // (a blinker at 3 Hz is NOT rejected: it leaks through a window of 12 pictures. Nothing on the robot blinks at 3 Hz
-  // once the script has switched the behaviors off.)
-  for (const blinkHz of [1, 2]) {
+test('something that pulses much more slowly (0.5 or 1 Hz) is not found; 2 and 3 Hz are (a window of 1 s tells apart blinkers 0.5 Hz away or more)', () => {
+  // measured at 30 pictures a second, 4 LEDs, response of a pixel that blinks at f (100 at the robot's 2.5 Hz): 0.5 Hz 3,
+  // 1 Hz 16, 1.5 Hz 17, 2 Hz 50, 3 Hz 67, 3.5 Hz 6, 4 Hz 36, 5 Hz 19. Nothing on the robot blinks once the script has
+  // switched the behaviors off: this is about the neighbours of the robot's rhythm, which the window cannot refuse.
+  for (const blinkHz of [0.5, 1]) {
     const { res } = run({ blinkHz });
     assert.equal(res.spots.length, 0, `${blinkHz} Hz`);
+  }
+  for (const blinkHz of [2, 3]) {
+    const { res } = run({ blinkHz });
+    assert.equal(res.spots.length, 16, `${blinkHz} Hz leaks through`);
+  }
+});
+
+test('a phone that analyses only 6 or 10 pictures a second (the first test on a phone had 5.9) still finds the LEDs at 2.5 Hz', () => {
+  for (const fps of [6, 10]) {
+    const { res } = run({ count: 5 * fps, tOpts: { fps, jitter: fps === 6 ? 25 : 8 } });
+    assert.equal(res.spots.length, 16, `${fps} pictures a second`);
+    assert.equal(matched(res.spots), 16);
   }
 });
 
@@ -131,7 +146,7 @@ test('a hand that shakes by a pixel: the LEDs are still all found, with no more 
 test('a slow steady drift of the whole picture (the hand moves): the LEDs are found where they have gone, nothing else', () => {
   // 3 px a second to the right: the edges of the body and of the table slide across the pixels
   const rnd = rng(9);
-  const lock = new LockIn({ hz: BLINK_HZ });
+  const lock = new LockIn({ hz: BLINK_HZ, windowMs: WINDOW });
   const finder = new SpotFinder();
   let res = null, dx = 0;
   for (const t of times(48, { fps: 30, jitter: 3, rnd })) {
@@ -145,14 +160,16 @@ test('a slow steady drift of the whole picture (the hand moves): the LEDs are fo
   assert.ok(res.spots.length <= 19, `${res.spots.length} spots`);
 });
 
-test('a sliding edge alone (no blink at all, the picture drifts at 4 px a second) is not taken for a blink', () => {
+test('a sliding edge alone (no blink at all, the picture drifts at 4 px a second) is not taken for a blink by the colour signal', () => {
+  // (the total signal answers about 55 of 255 to an edge that slides at 2 to 16 px a second, at the 2.5 Hz of the robot:
+  // that is why the page uses the colour signal, which gives 0 there)
   const rnd = rng(4);
-  const lock = new LockIn({ hz: BLINK_HZ });
+  const lock = new LockIn({ hz: BLINK_HZ, windowMs: WINDOW });
   const finder = new SpotFinder();
   let res = null;
   for (const t of times(48, { fps: 30, jitter: 3, rnd })) {
     const ready = lock.push(frame({ on: false, rnd, dx: Math.round(((t - 1000) / 1000) * 4) }), W, H, t);
-    if (ready) res = finder.findFromValues(lock.amp, W, H, 40, { minArea: 3, maxArea: 600 });
+    if (ready) res = finder.findFromValues(lock.chroma, W, H, 40, { minArea: 3, maxArea: 600 });
   }
   assert.equal(res.spots.length, 0);
 });
@@ -176,7 +193,7 @@ test('the green signal keeps the shaking outline of the body from being taken fo
 test('the colour signal ignores a change of brightness alone (a white light that blinks), the total signal does not', () => {
   // the 16 LEDs steady and green; a white patch blinks
   const rnd = rng(21);
-  const lock = new LockIn({ hz: BLINK_HZ });
+  const lock = new LockIn({ hz: BLINK_HZ, windowMs: WINDOW });
   const finder = new SpotFinder();
   let g = null, tot = null;
   for (const t of times(40, { rnd })) {
@@ -196,7 +213,7 @@ test('the colour signal is a colour signal, not a green one: a blue light that b
   // (so a blinking blue or red light on the robot would be taken for an LED: nothing on the robot blinks once the
   // script has switched the behaviors off)
   const rnd = rng(22);
-  const lock = new LockIn({ hz: BLINK_HZ });
+  const lock = new LockIn({ hz: BLINK_HZ, windowMs: WINDOW });
   const finder = new SpotFinder();
   let g = null;
   for (const t of times(40, { rnd })) {
@@ -218,14 +235,26 @@ test('the amplitude is 0.64 of the root of the sum of the squares of the three d
   assert.ok(Math.abs(a - 0.6366 * diff) <= 0.15 * 0.6366 * diff, `amplitude ${a}, expected about ${(0.6366 * diff).toFixed(0)}`);
 });
 
-test('not ready before K pictures, and a long gap starts again', () => {
+test('the sums wait for most of a window, a long gap starts again, and computeEvery thins the sums out but keeps every picture', () => {
   const rnd = rng(3);
-  const lock = new LockIn({ hz: BLINK_HZ });
   const f = frame({ on: true, rnd });
-  const lock12 = lock;
-  for (let i = 0; i < 11; i++) assert.equal(lock12.push(f, W, H, 1000 + i * 33), false);
-  assert.equal(lock12.push(f, W, H, 1000 + 11 * 33), true);
-  assert.equal(lock12.push(f, W, H, 1000 + 12 * 33 + 5000), false, 'after 5 s of nothing');
+  const lock = new LockIn({ hz: BLINK_HZ, windowMs: WINDOW });
+  for (let i = 0; i < 25; i++) assert.equal(lock.push(f, W, H, 1000 + i * 33), false, `picture ${i}: under 80 % of a window`);
+  assert.equal(lock.push(f, W, H, 1000 + 25 * 33), true);
+  assert.equal(lock.push(f, W, H, 1000 + 26 * 33 + 5000), false, 'after 5 s of nothing');
+  assert.equal(lock.ready, false);
+
+  const thin = new LockIn({ hz: BLINK_HZ, windowMs: WINDOW, computeEvery: 90 });
+  let sums = 0;
+  const finder = new SpotFinder();
+  let res = null;
+  const r2 = rng(8);
+  for (const t of times(90, { rnd: r2 })) {
+    if (thin.push(frame({ on: ((t / 1000) * BLINK_HZ) % 1 < 0.5, rnd: r2 }), W, H, t)) { sums++; res = finder.findFromValues(thin.amp, W, H, 40, { minArea: 3, maxArea: 600 }); }
+  }
+  assert.ok(thin.ready);
+  assert.equal(res.spots.length, 16);
+  assert.ok(sums >= 12 && sums <= 22, `${sums} sums for 65 pictures after the first window, one every 90 ms or so`);
 });
 
 test('speed of the lock-in (reported, loosely bounded)', () => {
