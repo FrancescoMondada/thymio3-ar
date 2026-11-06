@@ -1,0 +1,20 @@
+{
+  "name": "thymio3-ar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Test page for an augmented-reality view of the Thymio 3: can a tablet find the robot's LEDs in its camera, fast enough?",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.js && python3 -I tests/test_leds_on.py",
+    "api:update": "npm update thymio3-ts-api"
+  },
+  "dependencies": {
+    "thymio3-ts-api": "github:Mobsya/thymio3-ts-api#main"
+  },
+  "devDependencies": {
+    "vite": "^8.2.2"
+  }
+}

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1020" />
+    <title>Thymio · Test RA</title>
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: #141a2e;
+        --line: #2a3352;
+        --text: #e8ecf8;
+        --dim: #9aa4c4;
+        --ok: #3ddc97;
+        --warn: #ffb454;
+        --bad: #ff6b6b;
+        --accent: #6aa8ff;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+      #app { display: grid; height: 100%; grid-template-rows: minmax(0, 52%) minmax(0, 1fr); }
+      @media (orientation: landscape) and (min-width: 700px) {
+        #app { grid-template-rows: none; grid-template-columns: minmax(0, 1fr) 360px; }
+      }
+      #stage { position: relative; background: #000; display: grid; place-items: center; overflow: hidden; }
+      #view { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; }
+      #splash { position: absolute; inset: 0; display: grid; place-content: center; gap: 14px; padding: 24px; text-align: center; background: rgba(11, 16, 32, 0.92); }
+      #splash h1 { margin: 0; font-size: 22px; }
+      #splash p { margin: 0 auto; max-width: 34em; color: var(--dim); }
+      #splash .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+      #err { color: var(--bad); min-height: 1.4em; }
+      aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 12px 16px calc(16px + env(safe-area-inset-bottom)); }
+      section { padding: 10px 0; border-bottom: 1px solid var(--line); }
+      section:last-child { border-bottom: 0; }
+      h2 { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 700; }
+      button { font: inherit; font-weight: 600; min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: #1d2540; color: var(--text); cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #07101f; }
+      button:disabled { opacity: 0.45; cursor: default; }
+      button.on { background: var(--ok); border-color: var(--ok); color: #05150d; }
+      select, input[type='range'] { font: inherit; }
+      select { min-height: 40px; border-radius: 8px; background: #1d2540; color: var(--text); border: 1px solid var(--line); padding: 0 8px; }
+      input[type='range'] { width: 100%; accent-color: var(--accent); min-height: 32px; }
+      label { display: flex; align-items: center; gap: 8px; min-height: 36px; }
+      .big { font-size: 40px; font-weight: 800; line-height: 1.1; }
+      .big small { font-size: 15px; font-weight: 600; color: var(--dim); margin-left: 6px; }
+      .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); } .dim { color: var(--dim); }
+      table { width: 100%; border-collapse: collapse; }
+      td { padding: 2px 0; vertical-align: top; }
+      td:last-child { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+      .note { color: var(--dim); font-size: 13px; margin: 4px 0 0; }
+      #report { white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; background: #0d1224; border: 1px solid var(--line); border-radius: 8px; padding: 8px; max-height: 220px; overflow: auto; margin: 6px 0 0; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="stage">
+        <canvas id="view" width="640" height="360"></canvas>
+        <div id="splash">
+          <h1>Test : retrouver les LED du Thymio avec la caméra</h1>
+          <p>Posez le robot sur la table, ses 16 LED du dessus allumées au maximum (le bouton « Robot » plus bas le fait). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
+          <div class="row">
+            <button class="primary" id="startBack">Caméra arrière</button>
+            <button id="startFront">Caméra avant</button>
+            <button id="startDemo">Scène simulée (sans caméra)</button>
+          </div>
+          <div id="err" role="alert"></div>
+        </div>
+      </div>
+      <aside>
+        <section>
+          <h2>Points lumineux</h2>
+          <div class="big" id="count">–</div>
+          <div class="note" id="countNote">Il doit y en avoir 16 (2 rangées de 8).</div>
+        </section>
+        <section>
+          <h2>Vu de côté ?</h2>
+          <div class="big" id="angle" style="font-size:28px">n/d</div>
+          <div class="note" id="angleNote">Angle entre l'axe de la caméra et la table : 90° = de face au-dessus, 0° = à ras de la table. Inclinez la tablette peu à peu : le tableau compte les points vus à chaque angle.</div>
+          <table id="angleTable" style="margin-top:6px"></table>
+          <button id="resetAngles" style="width:100%; margin-top:6px">Remettre le tableau à zéro</button>
+        </section>
+        <section>
+          <h2>Vitesse</h2>
+          <table>
+            <tr><td>Images reçues de la caméra</td><td id="fpsIn">n/d</td></tr>
+            <tr><td>Images analysées</td><td id="fpsOut">n/d</td></tr>
+            <tr><td>Retard caméra → page</td><td id="latency">n/d</td></tr>
+            <tr><td>Lecture de l'image</td><td id="tRead">n/d</td></tr>
+            <tr><td>Recherche des points</td><td id="tFind">n/d</td></tr>
+            <tr><td>Stabilité de l'éclat</td><td id="flicker">n/d</td></tr>
+          </table>
+          <p class="note" id="speedNote"></p>
+        </section>
+        <section>
+          <h2>Réglages</h2>
+          <label>Largeur analysée
+            <select id="procWidth">
+              <option value="320">320 px</option>
+              <option value="640" selected>640 px</option>
+              <option value="960">960 px</option>
+              <option value="1280">1280 px</option>
+            </select>
+          </label>
+          <label>Points comptés
+            <select id="colorFilter">
+              <option value="all" selected>de toutes les couleurs</option>
+              <option value="vert">verts seulement (les 16 LED)</option>
+            </select>
+          </label>
+          <label for="threshold" style="min-height:0">Seuil de luminosité : <b id="thresholdValue">200</b> <span class="dim">(plus clair vu : <span id="brightest">–</span>)</span></label>
+          <input id="threshold" type="range" min="60" max="254" value="200" />
+          <label for="contrast" style="min-height:0">Contraste local : <b id="contrastValue">20</b> <span class="dim">(0 = sans)</span></label>
+          <input id="contrast" type="range" min="0" max="100" value="20" />
+          <p class="note" style="margin:0 0 4px">Une LED doit dépasser le seuil <b>et</b> être plus claire que ses voisins : le corps blanc du robot n'est pas un point.</p>
+          <label><input id="mask" type="checkbox" /> Montrer ce que les réglages laissent passer</label>
+        </section>
+        <section>
+          <h2>Caméra</h2>
+          <div id="camInfo" class="note" style="margin:0 0 6px">–</div>
+          <div class="grid2">
+            <button id="lockExposure" disabled>Verrouiller l'exposition</button>
+            <button id="switchCam" disabled>Changer de caméra</button>
+          </div>
+          <label for="exposureTime" id="exposureLabel" style="display:none">Temps d'exposition : <b id="exposureValue"></b></label>
+          <input id="exposureTime" type="range" style="display:none" />
+          <p class="note" id="exposureNote"></p>
+        </section>
+        <section>
+          <h2>Robot</h2>
+          <button id="robot" style="width:100%">Connecter le robot et allumer les 16 LED</button>
+          <p class="note" id="robotNote"></p>
+        </section>
+        <section>
+          <h2>Rapport</h2>
+          <button id="copy" style="width:100%">Copier le rapport</button>
+          <pre id="report"></pre>
+        </section>
+      </aside>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
