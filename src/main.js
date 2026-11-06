@@ -7,7 +7,9 @@ import { Rolling, Rate, fmt } from './stats.js';
 import { startCamera, exposureInfo, setExposure } from './camera.js';
 import { startDemo } from './demo.js';
 import { viewAngleDeg, AngleTable } from './angle.js';
-import ledsOnScript from './py/leds_on.py?raw';
+import { LockIn } from './lockin.js';
+import { BLINK_HZ, buildScript } from './script.js';
+import ledsLegoScript from './py/leds_lego.py?raw';
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -16,8 +18,10 @@ const params = new URLSearchParams(location.search);
 const canvas = $('view');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
+const lock = new LockIn({ hz: BLINK_HZ });
 
-const state = { cam: null, facing: 'environment', demo: false, threshold: 200, contrast: 20, color: 'all', mask: false, procWidth: 640 };
+// detect: 'blink' (the LEDs that blink at the robot's rhythm) or 'bright' (the bright spots of each picture)
+const state = { cam: null, facing: 'environment', demo: false, detect: params.get('detect') === 'bright' ? 'bright' : 'blink', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, threshold: 200, contrast: 20, color: 'all', mask: false, procWidth: 640 };
 
 // what is measured, over the last frames
 const win = {
@@ -79,22 +83,32 @@ function tick(cam, now, meta) {
     ctx.drawImage(v, 0, 0, W, H);
     const img = ctx.getImageData(0, 0, W, H);
     const b = performance.now();
-    const res = finder.find(img.data, W, H, state.threshold, {
-      contrast: state.contrast, radius: Math.max(4, Math.round(W / 80)), minArea: 2, maxArea: Math.max(50, (W * H) / 150),
-    });
+    // two ways to find the LEDs: the ones that BLINK at the robot's rhythm (lockin.js: steady lights of any kind are
+    // ignored), or the bright spots in each picture (detect.js)
+    const blink = state.detect === 'blink';
+    const size = { minArea: 2, maxArea: Math.max(50, (W * H) / 150) };
+    let res;
+    if (blink) {
+      const ready = lock.push(img.data, W, H, meta.captureTime != null ? meta.captureTime : now);
+      res = ready ? finder.findFromValues(state.signal === 'color' ? lock.chroma : lock.amp, W, H, state.blinkThreshold, size) : { spots: [], brightest: 0, lit: 0, waiting: true };
+    } else {
+      res = finder.find(img.data, W, H, state.threshold, { contrast: state.contrast, radius: Math.max(4, Math.round(W / 80)), ...size });
+    }
     const c = performance.now();
-    if (state.mask) { finder.paintMask(img.data); ctx.putImageData(img, 0, 0); }
+    if (state.mask && !res.waiting) { finder.paintMask(img.data); ctx.putImageData(img, 0, 0); }
     // the spots that count: all of them, or the green ones (the 16 Lego LEDs; the ring round the pad and the body
-    // LEDs are other colours and also bright)
-    const counted = state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
+    // LEDs are other colours and also bright); a blinking spot has no colour: they all count
+    const counted = blink || state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
     drawSpots(res.spots, counted);
 
     win.read.push(b - a);
     win.find.push(c - b);
-    win.counts.push(counted.length);
-    win.weights.push(counted.reduce((s, p) => s + p.weight, 0));
-    angles.add(currentAngle(), counted.length);         // zeros count too: "no LED at all from 20°" is the answer, not a gap
     win.rateOut.tick(now);
+    if (!res.waiting) {
+      win.counts.push(counted.length);
+      win.weights.push(counted.reduce((s, p) => s + p.weight, 0));
+      angles.add(currentAngle(), counted.length);       // zeros count too: "no LED at all from 20°" is the answer, not a gap
+    }
     win.last = { ...res, spots: counted, found: res.spots };
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
@@ -141,13 +155,19 @@ function refreshPanel() {
   const big = $('count');
   big.className = `big ${!state.cam ? 'dim' : steady ? 'ok' : n === 0 ? 'dim' : 'warn'}`;
   big.innerHTML = state.cam ? `${n}<small>sur 16</small>` : '–';
+  const blink = state.detect === 'blink';
   $('countNote').textContent = !state.cam ? 'Il doit y en avoir 16 (2 rangées de 8).'
-    : `Sur les ${counts.count} dernières images : de ${counts.min} à ${counts.max} (points vus : ${colorsText(win.last.found || [])}). ` +
+    : win.last.waiting ? `Attente de ${lock.K} images pour mesurer le clignotement…`
+    : `Sur les ${counts.count} dernières images : de ${counts.min} à ${counts.max}${blink ? '' : ` (points vus : ${colorsText(win.last.found || [])})`}. ` +
       (steady ? 'Les 16 LED sont vues, image après image.'
-        : n === 0 ? 'Rien au-dessus du seuil : LED éteintes ? seuil trop haut ?'
-        : n < 16 ? 'Moins de 16 : LED éteintes ou cachées, ou points collés (essayez 960 / 1280 px, ou rapprochez-vous).'
-        : 'Plus de 16 : des reflets ? remontez le seuil.');
+        : n === 0 ? (blink ? `Aucun point ne clignote à ${BLINK_HZ.toFixed(1)} Hz : le robot clignote-t-il (bouton Robot, LED clignotantes) ? seuil trop haut ?` : 'Rien au-dessus du seuil : LED éteintes ? seuil trop haut ?')
+        : n < 16 ? (blink ? 'Moins de 16 : LED cachées ou collées, image qui bouge trop, seuil trop haut ; ou le robot ne clignote pas encore.' : 'Moins de 16 : LED éteintes ou cachées, ou points collés (essayez 960 / 1280 px, ou rapprochez-vous).')
+        : (blink ? 'Plus de 16 : quelque chose d\'autre clignote ou la scène bouge ; remontez le seuil.' : 'Plus de 16 : des reflets ? remontez le seuil.'));
 
+  $('detectNote').textContent = state.detect === 'blink' && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : la détection par clignotement ne verra rien (choisissez « LED clignotantes »).'
+    : state.detect === 'bright' && robot.on && robot.mode === 'blink' ? 'Les LED clignotent : la détection par luminosité ne les voit qu\'une image sur deux (choisissez « allumées en continu »).'
+    : state.detect === 'blink' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter.' : '';
+  $('ampMax').textContent = state.cam ? String(win.last.brightest) : '–';
   const ang = currentAngle();
   $('angle').textContent = state.cam ? (Number.isFinite(ang) ? `${Math.round(ang)}°` : 'n/d') : 'n/d';
   $('angleNote').textContent = state.cam && !state.cam.angle && !sensor.seen
@@ -197,7 +217,7 @@ function report() {
     `caméra: ${state.cam ? `${state.cam.label} ${state.cam.settings.width}x${state.cam.settings.height} @${state.cam.settings.frameRate ?? '?'}` : 'non démarrée'}${state.demo ? ' (SCÈNE SIMULÉE)' : ''}`,
     `requestVideoFrameCallback: ${typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype ? 'oui' : 'non'}`,
     `Web Bluetooth: ${'bluetooth' in navigator ? 'oui' : 'non'}`,
-    `analyse: ${canvas.width}x${canvas.height}, seuil ${state.threshold}, contraste local ${state.contrast}, points comptés: ${state.color === 'all' ? 'toutes couleurs' : state.color}, masque ${state.mask ? 'oui' : 'non'}`,
+    `détection: ${state.detect === 'blink' ? `par clignotement (${BLINK_HZ.toFixed(2)} Hz, ${lock.K} images, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `images reçues/s: ${fmt(cameraFps(), 1)}  analysées/s: ${fmt(win.rateOut.perSecond, 1)}`,
     `retard caméra→page: ${latency.count ? `${fmt(latency.mean, 0)} ms (${win.latencyKind})` : 'n/d'}`,
@@ -210,7 +230,7 @@ function report() {
     ...angles.summary().map((r) => `  ${r.label}: ${r.frames} · ${fmt(r.mean, 1)} · ${r.frames ? r.max : 'n/d'} · ${fmt(r.fullPct, 0, ' %')}`),
     `plus clair: ${win.last.brightest}`,
     `exposition: ${exposureText()}`,
-    `robot: ${robot.text}`,
+    `robot: ${robot.text}${robot.on ? ` (LED ${robot.mode})` : ''}`,
   ].join('\n');
 }
 
@@ -235,7 +255,9 @@ async function start(kind) {
     state.facing = kind === 'front' ? 'user' : 'environment';
     if (!state.demo) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
-    const cam = state.demo ? await startDemo({ elev }) : await startCamera({ facing: state.facing });
+    const cam = state.demo
+      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0) })
+      : await startCamera({ facing: state.facing });
     state.cam = cam;
     resetWindows();
     resetAngles();
@@ -290,43 +312,59 @@ async function toggleExposure() {
 }
 
 // ---- robot -------------------------------------------------------------------------------------------
-const robot = { api: null, on: false, text: 'non connecté' };
+// The script on the robot (py/leds_lego.py) has three modes for the 16 top LEDs: blinking (what the blink detection
+// looks for), on, off. Changing the mode while it runs sends the script again.
+const robot = { api: null, on: false, mode: null, busy: false, text: 'non connecté' };
 const robotNote = (text, cls = 'dim') => { $('robotNote').textContent = text; $('robotNote').className = `note ${cls}`; robot.text = text; };
+const MODE_NOTE = {
+  blink: `Script lancé : les 16 LED clignotent (${BLINK_HZ.toFixed(1)} Hz).`,
+  on: 'Script lancé : les 16 LED sont allumées en continu (niveau 16, sans scintillement).',
+  off: 'Script lancé : les 16 LED sont éteintes (les autres LED du robot ne changent pas).',
+};
+const bluetoothOk = () => 'bluetooth' in navigator;
+
+async function launchRobot() {
+  const mode = state.ledMode;
+  robotNote('Connexion…');
+  robot.api = robot.api || (await import('thymio-api'));
+  const api = robot.api;
+  if (!api.isConnected()) await api.requestAndConnect();
+  if (!api.isConnected()) throw new Error('le robot n\'est pas connecté');
+  try { await api.stopSensorStreaming?.(); } catch { /* not streaming */ }
+  await api.stopScriptExecution();
+  await sleep(60);
+  robotNote('Envoi du script au robot…');
+  await api.sendPythonScript(buildScript(ledsLegoScript, mode));
+  await api.executeLoadedScript();
+  robot.on = true;
+  robot.mode = mode;
+  $('robot').textContent = 'Rendre la main au robot (arrêter le script)';
+  $('robot').classList.add('on');
+  robotNote(MODE_NOTE[mode], 'ok');
+}
 
 async function toggleRobot() {
-  const btn = $('robot');
-  btn.disabled = true;
+  if (robot.busy) return;
+  robot.busy = true;
+  $('robot').disabled = true;
   try {
-    if (!robot.on) {
-      robotNote('Connexion…');
-      robot.api = robot.api || (await import('thymio-api'));
-      const api = robot.api;
-      if (!api.isConnected()) await api.requestAndConnect();
-      if (!api.isConnected()) throw new Error('le robot n\'est pas connecté');
-      try { await api.stopSensorStreaming?.(); } catch { /* not streaming */ }
-      await api.stopScriptExecution();
-      await sleep(60);
-      robotNote('Envoi du script au robot…');
-      await api.sendPythonScript(ledsOnScript);
-      await api.executeLoadedScript();
-      robot.on = true;
-      btn.textContent = 'Éteindre les LED (arrêter le script)';
-      btn.classList.add('on');
-      robotNote('Script lancé : les 16 LED doivent être allumées (niveau 16, sans scintillement).', 'ok');
-    } else {
+    if (!robot.on) await launchRobot();
+    else {
       await robot.api.stopScriptExecution();
       robotOff('Script arrêté : le firmware reprend ses LED.');
     }
   } catch (err) {
     robotNote(`${err?.name || 'Erreur'} : ${err?.message || err}`, 'bad');
   } finally {
-    btn.disabled = !('bluetooth' in navigator);
+    robot.busy = false;
+    $('robot').disabled = !bluetoothOk();
   }
 }
 
 function robotOff(text) {
   robot.on = false;
-  $('robot').textContent = 'Connecter le robot et allumer les 16 LED';
+  robot.mode = null;
+  $('robot').textContent = 'Connecter le robot et lancer';
   $('robot').classList.remove('on');
   robotNote(text);
 }
@@ -341,6 +379,15 @@ $('startDemo').onclick = () => start('demo');
 $('switchCam').onclick = () => start(state.facing === 'user' ? 'back' : 'front');
 $('lockExposure').onclick = toggleExposure;
 $('robot').onclick = toggleRobot;
+$('ledMode').onchange = async (e) => {
+  state.ledMode = e.target.value;
+  if (!robot.on || robot.busy) return;
+  robot.busy = true;                                    // the script runs: send it again with the new mode
+  try { await launchRobot(); } catch (err) { robotNote(`${err?.name || 'Erreur'} : ${err?.message || err}`, 'bad'); } finally { robot.busy = false; }
+};
+$('detect').onchange = (e) => { setDetect(e.target.value); };
+$('signal').onchange = (e) => { state.signal = e.target.value; resetWindows(); resetAngles(); };
+$('blinkThreshold').oninput = (e) => { state.blinkThreshold = +e.target.value; $('blinkThresholdValue').textContent = String(state.blinkThreshold); resetWindows(); resetAngles(); };
 $('threshold').oninput = (e) => { state.threshold = +e.target.value; $('thresholdValue').textContent = String(state.threshold); resetWindows(); resetAngles(); };
 $('contrast').oninput = (e) => { state.contrast = +e.target.value; $('contrastValue').textContent = String(state.contrast); resetWindows(); resetAngles(); };
 $('colorFilter').onchange = (e) => { state.color = e.target.value; resetWindows(); resetAngles(); };
@@ -358,8 +405,19 @@ $('copy').onclick = async () => {
   setTimeout(() => { $('copy').textContent = 'Copier le rapport'; }, 2000);
 };
 
+function setDetect(mode) {
+  state.detect = mode;
+  $('detect').value = mode;
+  $('signal').value = state.signal;
+  lock.reset();
+  resetWindows();
+  resetAngles();
+  for (const el of document.querySelectorAll('[data-for]')) el.style.display = el.dataset.for === mode ? '' : 'none';
+}
+setDetect(state.detect);
+
 if (!('bluetooth' in navigator)) robotNote('Pas de Web Bluetooth dans ce navigateur (sur iPad : Bluefy). La caméra se teste quand même, avec les LED allumées autrement.');
-$('robot').disabled = !('bluetooth' in navigator);       // the robot can be lit with no camera started: to photograph it with another device
+$('robot').disabled = !bluetoothOk();       // the robot can be lit with no camera started: to photograph it with another device
 setInterval(refreshPanel, 250);
 refreshPanel();
 if (params.has('demo')) start('demo');

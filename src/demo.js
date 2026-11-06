@@ -7,9 +7,12 @@
 // together. It does not know how much light an LED gives out sideways (it draws every LED as bright from
 // every side): that is what the test on a real robot is for.
 //
-// `?demo&elev=30` holds the view at 30° instead of swinging.
+// `?demo&elev=30` holds the view at 30° instead of swinging. `&blink` makes the 16 LEDs blink as the robot's script
+// does; `&extra` adds steady lights of other colours (a blue one, a red glow, a ring of amber ones), as on the real
+// robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles.
 
 import { fromStream } from './camera.js';
+import { HALF_MS } from './script.js';
 
 export const DEMO_W = 1280;
 export const DEMO_H = 720;
@@ -58,7 +61,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -78,6 +81,17 @@ export async function startDemo({ elev = null } = {}) {
     g.fill();
   };
 
+  // a round light at a projected point: `stops` are the colours at 0, 0.3, 0.65 and 1 of its radius (`mm` wide in the world)
+  const glow = (c, mm, stops) => {
+    const r = (mm * FOCAL) / c.z;
+    const halo = g.createRadialGradient(c.x, c.y, 0, c.x, c.y, r);
+    [0, 0.3, 0.65, 1].forEach((at, i) => halo.addColorStop(at, stops[i]));
+    g.fillStyle = halo;
+    g.beginPath();
+    g.arc(c.x, c.y, r, 0, 2 * Math.PI);
+    g.fill();
+  };
+
   const draw = () => {
     const t = (performance.now() - t0) / 1000;
     view.elev = elev != null ? elev : 55 + 35 * Math.sin((2 * Math.PI * t) / 40);       // 20 .. 90°
@@ -86,6 +100,8 @@ export async function startDemo({ elev = null } = {}) {
 
     g.fillStyle = '#10141c';
     g.fillRect(0, 0, DEMO_W, DEMO_H);
+    g.save();
+    if (shake) g.translate(Math.round((Math.random() - 0.5) * 2 * shake), Math.round((Math.random() - 0.5) * 2 * shake));
     // the sides of the body that face the camera
     for (let i = 0; i < body.length; i++) {
       const a = body[i], b = body[(i + 1) % body.length];
@@ -97,20 +113,19 @@ export async function startDemo({ elev = null } = {}) {
     }
     poly(body.map((p) => project(cam, p)), '#d9dde3');
     poly(pad.map((p) => project(cam, p)), '#b8bec8');
-    // the 16 LEDs: a small white core with a soft halo about 5 mm across, as seen from every side
-    for (const p of leds) {
-      const c = project(cam, p);
-      const r = (2.6 * FOCAL) / c.z;
-      const halo = g.createRadialGradient(c.x, c.y, 0, c.x, c.y, r);
-      halo.addColorStop(0, 'rgb(255,255,255)');            // green LEDs with a white-hot core, as a phone camera shows them
-      halo.addColorStop(0.3, 'rgb(190,255,190)');
-      halo.addColorStop(0.65, 'rgb(70,255,70)');
-      halo.addColorStop(1, 'rgba(40,255,40,0)');
-      g.fillStyle = halo;
-      g.beginPath();
-      g.arc(c.x, c.y, r, 0, 2 * Math.PI);
-      g.fill();
+    // the 16 LEDs: green with a white-hot core, about 5 mm across, as seen from every side, steady or blinking
+    const lit = !blink || Math.floor((t * 1000) / HALF_MS) % 2 === 0;
+    if (lit) for (const p of leds) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
+    if (extra) {
+      // steady lights that are not the 16: a blue one at the front, a red glow low at the back, the ring round the pad
+      glow(project(cam, [0, 54, 0]), 3.5, ['rgb(255,255,255)', 'rgb(120,170,255)', 'rgb(40,80,255)', 'rgba(30,60,255,0)']);
+      for (const x of [-45, 45]) glow(project(cam, [x, -50, -HEIGHT]), 6, ['rgb(255,200,180)', 'rgb(255,80,40)', 'rgb(255,40,20)', 'rgba(255,30,10,0)']);
+      for (let i = 0; i < 8; i++) {
+        const a = (i * Math.PI) / 4;
+        glow(project(cam, [24 * Math.cos(a), 26 + 24 * Math.sin(a), 0]), 2.2, ['rgb(255,240,160)', 'rgb(255,200,40)', 'rgb(255,170,20)', 'rgba(255,150,0,0)']);
+      }
     }
+    g.restore();
   };
   draw();
   const timer = setInterval(draw, 1000 / 30);

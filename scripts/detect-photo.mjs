@@ -3,6 +3,12 @@
 //
 //   node scripts/detect-photo.mjs photos/robot.jpg [--width 1280] [--threshold 200] [--contrast 20]
 //        [--color all|vert] [--out annotated.png] [--mask masked.png] [--tmp DIR]
+//   node scripts/detect-photo.mjs photos/on.jpg --off photos/off.jpg [--diff-threshold 80] [--width 1280] ...
+//
+// With --off: the photo with the LEDs on, and one of the same view with them off (a tripod, or a steady hand); the
+// spots are where the two differ (the root of the sum of the squares of the three channel differences) by at least
+// --diff-threshold. Steady lights of any colour, the body, reflections: gone. A view that moved between the photos
+// leaves a bright outline on every edge.
 //
 // green circle: a spot that counts; grey circle: a spot of another colour (when --color vert).
 import { execFileSync } from 'node:child_process';
@@ -16,6 +22,7 @@ const file = args.find((a) => !a.startsWith('--') && !args[args.indexOf(a) - 1]?
 const opt = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
 if (!file) { console.error('usage: node scripts/detect-photo.mjs photo.jpg [--width 1280] [--threshold 200] [--contrast 20] [--color all|vert] [--out a.png] [--mask m.png] [--tmp DIR]'); process.exit(2); }
 
+const offFile = opt('off', null), diffThreshold = +opt('diff-threshold', 80);
 const width = +opt('width', 1280), threshold = +opt('threshold', 200), contrast = +opt('contrast', 20), color = opt('color', 'all');
 const tmp = mkdtempSync(join(opt('tmp', tmpdir()), 'spots-'));
 
@@ -66,12 +73,26 @@ try {
   const { w, h, rgba } = readBmp(bmp);
   const finder = new SpotFinder();
   const t0 = performance.now();
-  const res = finder.find(rgba, w, h, threshold, { contrast, radius: Math.max(4, Math.round(w / 80)), minArea: 2, maxArea: Math.max(50, (w * h) / 150) });
+  const size = { minArea: 2, maxArea: Math.max(50, (w * h) / 150) };
+  let res;
+  if (offFile) {
+    const bmpOff = join(tmp, 'off.bmp');
+    execFileSync('sips', ['-s', 'format', 'bmp', '--resampleWidth', String(width), offFile, '--out', bmpOff], { stdio: 'ignore' });
+    const off = readBmp(bmpOff);
+    if (off.w !== w || off.h !== h) throw new Error(`the two photos must be the same size (${w}x${h} and ${off.w}x${off.h})`);
+    const diff = new Uint8Array(w * h);
+    for (let i = 0, j = 0; i < diff.length; i++, j += 4) {
+      diff[i] = Math.min(255, Math.hypot(rgba[j] - off.rgba[j], rgba[j + 1] - off.rgba[j + 1], rgba[j + 2] - off.rgba[j + 2]));
+    }
+    res = finder.findFromValues(diff, w, h, diffThreshold, size);
+  } else {
+    res = finder.find(rgba, w, h, threshold, { contrast, radius: Math.max(4, Math.round(w / 80)), ...size });
+  }
   const ms = performance.now() - t0;
   const counted = color === 'all' ? res.spots : res.spots.filter((s) => s.color === color);
   const by = {};
   for (const s of res.spots) by[s.color] = (by[s.color] || 0) + 1;
-  console.log(`${w}x${h}  threshold ${threshold}  contrast ${contrast}  brightest ${res.brightest}  lit pixels ${res.lit}  search ${ms.toFixed(1)} ms`);
+  console.log(`${w}x${h}  ${offFile ? `difference with ${offFile}, threshold ${diffThreshold}` : `threshold ${threshold}  contrast ${contrast}`}  brightest ${res.brightest}  lit pixels ${res.lit}  search ${ms.toFixed(1)} ms`);
   console.log(`spots: ${res.spots.length} (${Object.entries(by).map(([c, n]) => `${n} ${c}`).join(', ') || 'none'});  counted (${color}): ${counted.length}`);
   for (const s of counted.slice().sort((a, b) => a.y - b.y).slice(0, 40)) console.log(`  ${s.color.padEnd(7)} x ${s.x.toFixed(1).padStart(7)} y ${s.y.toFixed(1).padStart(7)}  area ${String(s.area).padStart(4)}  ${s.w}x${s.h}  peak ${s.peak}`);
 

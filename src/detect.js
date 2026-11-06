@@ -57,9 +57,9 @@ export class SpotFinder {
   //    spots     [{ x, y, area, peak, weight, w, h, color }] the biggest weight first (at most `maxSpots`)
   //    brightest the highest value of any pixel (so that one can see where to put the threshold)
   //    lit       how many pixels are lit, whatever the spot they are in (or none)
-  find(rgba, w, h, threshold, { contrast = 0, radius = 8, minArea = 2, maxArea = 5000, maxSpots = 64, minFill = 0.3, maxAspect = 3 } = {}) {
+  find(rgba, w, h, threshold, opts = {}) {
     this.resize(w, h);
-    const { v, sum, lit, stack } = this;
+    const v = this.v;
     const n = w * h;
     let brightest = 0;
     for (let i = 0, j = 0; i < n; i++, j += 4) {
@@ -68,6 +68,23 @@ export class SpotFinder {
       v[i] = m;
       if (m > brightest) brightest = m;
     }
+    return this.trace(rgba, w, h, threshold, opts, brightest);
+  }
+
+  // The same on a picture that is already one value per pixel (0..255): the response of the blink detector (lockin.js),
+  // the difference of a picture with the LEDs on and one with them off. No colour then: the spots say 'clignotant'.
+  findFromValues(values, w, h, threshold, opts = {}) {
+    this.resize(w, h);
+    const n = w * h;
+    this.v.set(values.length === n ? values : values.subarray(0, n));
+    let brightest = 0;
+    for (let i = 0; i < n; i++) if (this.v[i] > brightest) brightest = this.v[i];
+    return this.trace(null, w, h, threshold, opts, brightest);
+  }
+
+  trace(rgba, w, h, threshold, { contrast = 0, radius = 8, minArea = 2, maxArea = 5000, maxSpots = 64, minFill = 0.3, maxAspect = 3 } = {}, brightest) {
+    const { v, sum, lit, stack } = this;
+    const n = w * h;
 
     // which pixels are lit
     const w1 = w + 1;
@@ -108,9 +125,11 @@ export class SpotFinder {
         const y = (p / w) | 0;
         const x = p - y * w;
         const wt = v[p] - threshold + 1;
-        const j = p * 4;
-        const pr = rgba[j], pg = rgba[j + 1], pb = rgba[j + 2];
-        if (Math.min(pr, pg, pb) <= 215) { cr += pr; cg += pg; cb += pb; cn++; }
+        if (rgba) {
+          const j = p * 4;
+          const pr = rgba[j], pg = rgba[j + 1], pb = rgba[j + 2];
+          if (Math.min(pr, pg, pb) <= 215) { cr += pr; cg += pg; cb += pb; cn++; }
+        }
         area++;
         sw += wt;
         sx += wt * x;
@@ -139,7 +158,7 @@ export class SpotFinder {
       litCount += area;
       const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
       if (area >= minArea && area <= maxArea && area >= minFill * bw * bh && Math.max(bw, bh) <= maxAspect * Math.min(bw, bh)) {
-        const color = cn ? colorName(cr / cn, cg / cn, cb / cn) : 'blanc';
+        const color = !rgba ? 'clignotant' : cn ? colorName(cr / cn, cg / cn, cb / cn) : 'blanc';
         spots.push({ x: sx / sw + 0.5, y: sy / sw + 0.5, area, peak, weight: sw, w: bw, h: bh, color });
       }
     }

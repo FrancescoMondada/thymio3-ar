@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test tests/*.test.js && python3 -I tests/test_leds_on.py",
+    "test": "node --test tests/*.test.js && python3 -I tests/test_leds_lego.py",
     "api:update": "npm update thymio3-ts-api"
   },
   "dependencies": {

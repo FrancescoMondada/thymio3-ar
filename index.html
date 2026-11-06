@@ -59,7 +59,7 @@
         <canvas id="view" width="640" height="360"></canvas>
         <div id="splash">
           <h1>Test : retrouver les LED du Thymio avec la caméra</h1>
-          <p>Posez le robot sur la table, ses 16 LED du dessus allumées au maximum (le bouton « Robot » plus bas le fait). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
+          <p>Posez le robot sur la table, ses 16 LED du dessus allumées au maximum (le bouton « Robot » plus bas les fait clignoter). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
           <div class="row">
             <button class="primary" id="startBack">Caméra arrière</button>
             <button id="startFront">Caméra avant</button>
@@ -95,6 +95,13 @@
         </section>
         <section>
           <h2>Réglages</h2>
+          <label>Détection
+            <select id="detect">
+              <option value="blink" selected>par clignotement (LED clignotantes)</option>
+              <option value="bright">par luminosité (LED fixes)</option>
+            </select>
+          </label>
+          <p class="note" id="detectNote" style="margin:0 0 4px"></p>
           <label>Largeur analysée
             <select id="procWidth">
               <option value="320">320 px</option>
@@ -103,6 +110,18 @@
               <option value="1280">1280 px</option>
             </select>
           </label>
+          <div data-for="blink">
+            <label>Signal du clignotement
+              <select id="signal">
+                <option value="color" selected>couleur (résiste au tremblement)</option>
+                <option value="any">toute variation (plus sensible)</option>
+              </select>
+            </label>
+            <label for="blinkThreshold" style="min-height:0">Seuil de clignotement : <b id="blinkThresholdValue">50</b> <span class="dim">(réponse max vue : <span id="ampMax">–</span>)</span></label>
+            <input id="blinkThreshold" type="range" min="15" max="150" value="50" />
+            <p class="note" style="margin:0 0 4px">Un point compte s'il s'allume et s'éteint au rythme du robot (fenêtre de 12 images, 0,4 s). Tout ce qui est fixe, même très brillant, est ignoré.</p>
+          </div>
+          <div data-for="bright">
           <label>Points comptés
             <select id="colorFilter">
               <option value="all" selected>de toutes les couleurs</option>
@@ -114,6 +133,7 @@
           <label for="contrast" style="min-height:0">Contraste local : <b id="contrastValue">20</b> <span class="dim">(0 = sans)</span></label>
           <input id="contrast" type="range" min="0" max="100" value="20" />
           <p class="note" style="margin:0 0 4px">Une LED doit dépasser le seuil <b>et</b> être plus claire que ses voisins : le corps blanc du robot n'est pas un point.</p>
+          </div>
           <label><input id="mask" type="checkbox" /> Montrer ce que les réglages laissent passer</label>
         </section>
         <section>
@@ -129,7 +149,14 @@
         </section>
         <section>
           <h2>Robot</h2>
-          <button id="robot" style="width:100%">Connecter le robot et allumer les 16 LED</button>
+          <label>LED du dessus
+            <select id="ledMode">
+              <option value="blink" selected>clignotantes (7,5 Hz)</option>
+              <option value="on">allumées en continu</option>
+              <option value="off">éteintes</option>
+            </select>
+          </label>
+          <button id="robot" style="width:100%">Connecter le robot et lancer</button>
           <p class="note" id="robotNote"></p>
         </section>
         <section>
