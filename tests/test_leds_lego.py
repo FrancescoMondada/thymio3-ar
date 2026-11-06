@@ -154,37 +154,34 @@ class Blink(unittest.TestCase):
 
 
 class Groups(unittest.TestCase):
-    """GROUP: all 16 LEDs (-1) or a quarter, 4 LEDs well apart; the others stay dark."""
+    """GROUP: all 16 LEDs (-1) or four aligned on one row, 16 mm apart; the others stay dark."""
 
     def lit(self, r):
         return {(row, i) for row in ("front", "back") for i, lvl in enumerate(r.state[row]) if lvl == 16}
 
-    def test_a_steady_quarter_lights_four_leds_and_leaves_the_rest_dark(self):
+    def test_a_steady_group_lights_four_aligned_leds_of_one_row_and_leaves_the_rest_dark(self):
         for g in range(4):
             r = Robot("on", 1200, group=g).run()
-            self.assertEqual(len(self.lit(r)), 4, "quarter %d" % g)
+            lit = self.lit(r)
+            self.assertEqual(len(lit), 4, "group %d" % g)
+            self.assertEqual({row for row, _ in lit}, {"front" if g < 2 else "back"})
+            self.assertEqual(sorted(i for _, i in lit), [g % 2 + 2 * k for k in range(4)])     # every other LED: 16 mm apart
             self.assertEqual(sum(1 for row in r.state.values() for lvl in row if lvl == 0), 12)
             self.assertEqual({lvl for row in r.state.values() for lvl in row}, {0, 16})
 
-    def test_the_four_quarters_are_the_sixteen_leds_each_once(self):
+    def test_the_four_groups_are_the_sixteen_leds_each_once(self):
         seen = []
         for g in range(4):
             seen += sorted(self.lit(Robot("on", 1200, group=g).run()))
         self.assertEqual(len(seen), 16)
         self.assertEqual(len(set(seen)), 16)
 
-    def test_the_four_of_a_quarter_are_at_least_18_mm_apart_if_the_index_runs_the_same_way_in_both_rows(self):
-        for g in range(4):
-            pos = [(i * 8.0, 0.0 if row == "front" else 8.0) for row, i in self.lit(Robot("on", 1200, group=g).run())]
-            nearest = min(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for k, a in enumerate(pos) for b in pos[k + 1:])
-            self.assertGreaterEqual(nearest, 17.8, "quarter %d: %.1f mm" % (g, nearest))
-
-    def test_a_blinking_quarter_switches_only_its_four_leds_and_keeps_the_beat(self):
+    def test_a_blinking_group_switches_only_its_four_leds_and_keeps_the_beat(self):
         half = 100
         r = Robot("blink", 30 * half, group=2, half_ms=half).run()
         leds = [e for e in r.events if e[0] == "led"]
         touched_on = {(e[1], e[2]) for e in leds if e[3] == 16}
-        self.assertEqual(len(touched_on), 4)
+        self.assertEqual(touched_on, {("back", 0), ("back", 2), ("back", 4), ("back", 6)})
         shows = r.shows()
         for (t0, _), (t1, _) in zip(shows, shows[1:]):
             self.assertEqual(t1 - t0, half)

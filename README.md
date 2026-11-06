@@ -14,26 +14,36 @@ npm test           # tests JavaScript + tests Python (le vrai script du robot, s
 npm run build
 ```
 
-## Deux façons de trouver les LED
+## Trois façons de trouver les LED
 
-- **Par clignotement** (par défaut). Le robot fait clignoter **un quart des 16 LED** (4 LED écartées d'au moins 18 mm : côte
-  à côte, à 8 mm, elles se confondent dans l'image d'un téléphone) à **2,5 Hz** (200 ms allumées, 200 ms éteintes ; réglable
-  de 1,25 à 7,5 Hz) : `src/py/leds_lego.py`, mode `blink`. La page cherche, pour chaque pixel, ce qui varie à ce rythme dans
-  les 2,5 dernières périodes (1 s à 2,5 Hz ; un détecteur à verrouillage, `src/lockin.js`). Tout ce qui est fixe est ignoré,
-  même très brillant : le corps blanc, l'anneau ambre autour du pavé, la LED bleue, la lueur rouge sous le robot, les
-  reflets. Pas besoin de connaître la phase ni de synchroniser la caméra et le robot : les temps réels des images servent de
-  référence, et à cette vitesse une demi-période dure environ 6 images de caméra. Deux signaux : *couleur* (le clignotement de
-  G − (R+B)/2, par défaut : un contour qui bouge avec la main change la luminosité mais pas la couleur, une LED verte change
-  les deux) et *toute variation* (plus sensible, mais les contours qui bougent y répondent).
-  Les quatre quarts : la LED `i` de la rangée avant est dans le quart `i % 4`, la LED `i` de la rangée arrière dans le quart
-  `(i + 2) % 4` ; **cela suppose que l'indice court dans le même sens sur les deux rangées** (pas vérifié sur le robot : si
-  les 4 LED allumées ne sont pas bien écartées, le dire).
+Le robot fait clignoter **4 LED alignées** d'une rangée, **une sur deux (16 mm d'écart)** : côte à côte, à 8 mm, les 16 LED
+se confondent dans l'image d'un téléphone. Quatre groupes : avant A, avant B, arrière A, arrière B (indices pairs ou impairs
+de la rangée ; ensemble, les 16). Le clignotement est de **2,5 Hz** par défaut (200 ms allumées, 200 ms éteintes ; réglable de
+1,25 à 7,5 Hz) : `src/py/leds_lego.py`, mode `blink`. Pas besoin de connaître la phase ni de synchroniser la caméra et le
+robot, et à 2,5 Hz une demi-période dure environ 6 images de caméra.
+
+- **Par différence de deux images** (par défaut, `src/pairdiff.js`). Pour chaque image, la page garde le *vert en excès*
+  `max(0, G − max(R, B))` de chaque pixel et le compare aux images vieilles de 0,4 à 1,6 demi-période : ce qui **monte** (LED
+  allumée maintenant, à sa place maintenant) ou **descend** (LED allumée avant, à sa place d'alors) est une LED. Le corps, la
+  table, l'anneau ambre, les lumières bleue, rouge, cyan, magenta, les reflets blancs ne changent pas ou n'ont pas de vert :
+  ils disparaissent. **Marche quand le téléphone bouge** : une LED qui s'allume apparaît dans la différence où qu'elle soit
+  dans l'image. Sur les vraies photos, une LED allumée donne 170 à 210 sur cette mesure.
+- **Par clignotement sur 1 s** (`src/lockin.js`) : pour chaque pixel, ce qui varie au rythme du robot dans les 2,5 dernières
+  périodes (détecteur à verrouillage). Plus sélectif en fréquence, mais **le téléphone doit rester posé** : dès que l'image
+  bouge de 2 à 4 diamètres de LED par seconde (moins d'une dizaine de pixels par seconde), il ne voit plus rien. C'est ce qui a
+  fait échouer le deuxième essai sur téléphone (voir plus bas). Deux signaux : *couleur* (par défaut) et *toute variation*.
 - **Par luminosité** (LED fixes) : plus clair que le seuil *et* que les voisins, de forme ronde, avec la couleur du point.
+
+**Filtre d'alignement** (`src/aligned.js`, quand 4 LED clignotent) : de tous les points trouvés, la page ne garde que 4
+(ou 3, signalé) **sur une droite, à intervalles réguliers** : les écarts le long de la droite ne varient que
+progressivement (jamais plus de 1,8 fois le voisin, 3 fois le plus petit), les points sont à moins de 6 % de la longueur
++ 1 px de la droite. Les autres points sont dessinés en gris. Une fausse détection tombe rarement sur la droite.
 
 ## Ce que fait la page
 
 - **Caméra** (arrière par défaut) ou **scène simulée** : `?demo`, avec `&blink` (LED clignotantes), `&extra` (lumières fixes
-  d'autres couleurs), `&shake=2` (la main qui tremble), `&elev=30` (angle fixé). Elle ne montre que la *géométrie* (quand les
+  d'autres couleurs), `&shake=2` (la main qui tremble), `&sway=20` (le téléphone qui balance à la main, 20 px de chaque côté),
+  `&elev=30` (angle fixé), `&group=-1` (les 16 LED), `&half=100` (clignotement 5 Hz), `&detect=blink` (autre détection). Elle ne montre que la *géométrie* (quand les
   LED se touchent dans l'image), pas la vraie lumière des LED vues de côté.
 - **Vu de côté ?** : l'angle entre l'axe de la caméra et la table (capteur d'orientation) et un tableau « combien de
   points vus à chaque angle », par tranches de 15°.
@@ -41,7 +51,7 @@ npm run build
   analysées par période de clignotement** (il en faut au moins 5). La taille analysée se règle par le **côté long** (480 px par
   défaut) : un téléphone tenu droit donne du 720×1280.
 - **Robot** : *Connecter le robot et lancer* envoie `leds_lego.py` au robot, avec le mode choisi (LED clignotantes,
-  allumées en continu, éteintes), le groupe (un des 4 quarts, ou les 16) et la vitesse ; changer l'un d'eux renvoie le script. Il faut un script **sur le robot** : le comportement par défaut (gyroscope), le mode
+  allumées en continu, éteintes), le groupe (une des 4 rangées partielles de 4 LED, ou les 16) et la vitesse ; changer l'un d'eux renvoie le script. Il faut un script **sur le robot** : le comportement par défaut (gyroscope), le mode
   leçons et le mode cartes dessinent déjà sur ces LED, et une commande Bluetooth serait écrasée (elle ne monte d'ailleurs
   qu'à 15 : 15/16 de PWM à 50 Hz scintille, 16 non). Tant qu'il tourne, ces affichages sont interrompus.
 - **Rapport** : tout ce qui précède en texte, à copier.
@@ -73,12 +83,18 @@ Vu sur les photos de l'utilisateur (Samsung, vues de dessus et de côté vers 35
   ambre et les 4 LED du corps (magenta, cyan…) ;
 - un tenon éteint vaut environ (152,167,158), allumé (143,251,19) avec un cœur presque blanc.
 
-**Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. Le rapport montre 5,9 images analysées par seconde
-(analyse en 720×1280 : 125 ms par image, quatre fois plus de pixels que ce qui avait été mesuré), un clignotement à 7,46 Hz
-(donc sous-échantillonné, et pas calé sur les images), le script du robot arrêté au moment du rapport, un seuil réglé à 126
-pour une réponse maximale de 62 : rien de concluant sur les LED elles-mêmes. Remarques de l'utilisateur : la fréquence est
-trop haute et pas synchronisée avec l'image ; les LED ne se distinguent pas les unes des autres. D'où : 2,5 Hz par défaut,
-analyse par le côté long, un quart des LED écartées. **Pas encore réessayé sur le téléphone.**
+**Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
+720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
+du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les
+LED ne se distinguent pas les unes des autres. D'où : 2,5 Hz, analyse par le côté long, 4 LED écartées à la fois.
+
+**Deuxième essai** (2026-11-06, 21h15) : l'utilisateur confirme que les 4 LED allumées sont bien écartées. Rapport : 0 point,
+25 images reçues et 10 analysées par seconde (taille choisie : 540×960, 85 ms par image, 4 images par période), réponse
+maximale 10 sur 255 avec le seuil réglé à 118 ; 8 images sur 115 avaient trouvé les 4 LED à 75–90°, puis plus rien à 60–75°
+pendant que le téléphone était incliné. **Explication retenue** (par simulation, pas encore confirmée sur le téléphone) : le
+détecteur sur 1 s suppose que chaque LED reste sur son pixel pendant une seconde, ce que ne fait aucun téléphone tenu à la main
+(il s'effondre dès 2 diamètres de LED par seconde, soit environ 13 px/s en 480 px). D'où : la **différence de deux images**
+par défaut, et le **filtre d'alignement** (idée de l'utilisateur) avec 4 LED alignées. **Pas encore réessayé sur le téléphone.**
 
 Mesuré sur des **vidéos synthétiques** (pas sur un robot) :
 - par luminosité : sur la première photo (tout allumé), le nombre de points verts va de 12 à 22 selon le contraste et la
@@ -91,12 +107,16 @@ Mesuré sur des **vidéos synthétiques** (pas sur un robot) :
 - à 2,5 Hz, avec la fenêtre de 1 s : les LED sont retrouvées même à 6 ou 10 images analysées par seconde ; un clignotant à 0,5 ou 1 Hz
   est refusé, à 2 ou 3 Hz il passe (la fenêtre ne sépare que des fréquences distantes de 0,5 Hz) ; un bord qui glisse de 2 à 16 px/s
   donne une réponse d'environ 55 sur 255 dans le signal *toute variation* et 0 dans le signal *couleur* ;
-- 16 LED à 480 px de côté long en vue de 45° (scène simulée) : de 12 à 16 points, car elles se touchent ; un quart : 4 sur 4, stable ;
+- 16 LED à 480 px de côté long en vue de 45° (scène simulée) : de 12 à 16 points, car elles se touchent ; 4 LED alignées : 4 sur 4 ;
+- image qui balance à la main (pic de 2 à 16 diamètres de LED par seconde, 6 à 25 images/s) : le détecteur sur 1 s trouve les 4 LED
+  dans 45 % des images à 2 diamètres/s et dans presque aucune au-delà ; la différence de deux images les trouve dans 94 à 100 %
+  jusqu'à 4 diamètres/s (85 % à 8 pour 10 images/s). Dans le volet, avec `&sway=20` (environ 6 diamètres/s) : 4 sur 4 avec le filtre
+  d'alignement, de 4 à 7 points sans lui ;
 - coût : 9 ms (Node) par image de 640×360, 37 ms à 1280×720 ; dans le volet, 8 ms par image à 480×270 (les sommes ne sont faites que
   toutes les 90 ms, toutes les images sont gardées).
 - scène simulée par luminosité (géométrie seule, 380 mm) : 16 points sur 16 jusqu'à 30°, dans 8 % des images à 20°, aucun à 10°.
 
-**Jamais essayé** : la nouvelle version sur un téléphone ou une tablette ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
+**Jamais essayé** : la différence de deux images et le filtre d'alignement sur un téléphone ou une tablette ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
 appels sont ceux de `thymio3-cards/src/py/lights.py`, qui ont tourné sur un vrai robot) ; la régularité réelle du clignotement
 (`time.sleep_ms` en MicroPython) ; l'effet de l'exposition automatique et de l'obturateur à balayage sur des LED qui clignotent ;
 la détection par clignotement sur une vraie photo ou vidéo (il faut une paire éteintes/allumées, ou la page sur téléphone).

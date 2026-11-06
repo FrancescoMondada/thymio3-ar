@@ -9,7 +9,8 @@
 //
 // `?demo&elev=30` holds the view at 30° instead of swinging. `&blink` makes the 16 LEDs blink as the robot's script
 // does; `&extra` adds steady lights of other colours (a blue one, a red glow, a ring of amber ones), as on the real
-// robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles.
+// robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles; `&sway=40` swings it 40 px
+// each way at 0.6 Hz (a peak speed of 150 px a second: a phone carried in the hand).
 
 import { fromStream } from './camera.js';
 import { HALF_MS, groupMembers } from './script.js';
@@ -61,7 +62,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, halfMs = () => HALF_MS, group = () => -1 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -102,6 +103,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     g.fillRect(0, 0, DEMO_W, DEMO_H);
     g.save();
     if (shake) g.translate(Math.round((Math.random() - 0.5) * 2 * shake), Math.round((Math.random() - 0.5) * 2 * shake));
+    if (sway) g.translate(sway * Math.sin(2 * Math.PI * 0.6 * t), 0.5 * sway * Math.sin(2 * Math.PI * 0.6 * t + 1));       // the phone swaying in the hand: `sway` px each way, at 0.6 Hz
     // the sides of the body that face the camera
     for (let i = 0; i < body.length; i++) {
       const a = body[i], b = body[(i + 1) % body.length];

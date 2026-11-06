@@ -10,15 +10,15 @@ export const hzOf = (halfMs) => 1000 / (2 * halfMs); // how often the LEDs go on
 export const BLINK_HZ = hzOf(HALF_MS);
 export const MODES = ['on', 'off', 'blink'];
 
-// Which LEDs the script drives: -1 = the 16, 0..3 = a quarter (4 LEDs, at least 18 mm apart, because next to each other
-// (8 mm) a phone camera cannot tell them apart). Same rule as GROUP in leds_lego.py: front LED i is in quarter i % 4,
-// back LED i in quarter (i + 2) % 4. -> [{ row: 'front' | 'back', i }]
+// Which LEDs the script drives: -1 = the 16, 0..3 = four LEDs ALIGNED on one row and 16 mm apart (every other LED of the
+// row, because next to each other, at 8 mm, a phone camera cannot tell them apart). Same rule as GROUP in leds_lego.py:
+// 0 front row even indices, 1 front odd, 2 back even, 3 back odd. -> [{ row: 'front' | 'back', i }]
 export const GROUPS = [-1, 0, 1, 2, 3];
 export const groupMembers = (group) => {
   const out = [];
   for (let i = 0; i < 8; i++) {
-    if (group < 0 || i % 4 === group) out.push({ row: 'front', i });
-    if (group < 0 || i % 4 === (group + 2) % 4) out.push({ row: 'back', i });
+    if (group < 0 || (group < 2 && i % 2 === group)) out.push({ row: 'front', i });
+    if (group < 0 || (group >= 2 && i % 2 === group - 2)) out.push({ row: 'back', i });
   }
   return out;
 };

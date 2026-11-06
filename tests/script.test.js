@@ -33,19 +33,17 @@ test('buildScript also writes the half period and the group of LEDs, each in its
   assert.throws(() => buildScript(raw.replace(/^GROUP.*$/m, ''), 'blink'), /GROUP line/);
 });
 
-test('the quarters: 4 LEDs each (2 front, 2 back), together the 16, and well apart', () => {
+test('the groups: 4 LEDs each, aligned on one row 16 mm apart, together the 16', () => {
   assert.equal(countOf(-1), 16);
   const seen = new Set();
   for (const g of [0, 1, 2, 3]) {
     const m = groupMembers(g);
     assert.equal(m.length, 4);
-    assert.equal(m.filter((l) => l.row === 'front').length, 2);
-    for (const l of m) { const key = `${l.row}${l.i}`; assert.ok(!seen.has(key), `${key} is in one quarter only`); seen.add(key); }
-    // where they are, if the index runs the same way along both rows: columns i, rows 0 (front) and 1 (back), 8 mm apart
-    const pos = m.map((l) => [l.i * 8, l.row === 'front' ? 0 : 8]);
-    let nearest = Infinity;
-    for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) nearest = Math.min(nearest, Math.hypot(pos[a][0] - pos[b][0], pos[a][1] - pos[b][1]));
-    assert.ok(nearest >= 17.8, `quarter ${g}: nearest two are ${nearest.toFixed(1)} mm apart (8 mm for neighbours)`);
+    assert.equal(new Set(m.map((l) => l.row)).size, 1, 'one row');
+    assert.equal(m[0].row, g < 2 ? 'front' : 'back');
+    for (const l of m) { const key = `${l.row}${l.i}`; assert.ok(!seen.has(key), `${key} is in one group only`); seen.add(key); }
+    const cols = m.map((l) => l.i).sort((a, b) => a - b);
+    for (let k = 1; k < 4; k++) assert.equal(cols[k] - cols[k - 1], 2, `group ${g}: every other LED of the row, 16 mm apart`);
   }
   assert.equal(seen.size, 16);
   assert.deepEqual(GROUPS, [-1, 0, 1, 2, 3]);

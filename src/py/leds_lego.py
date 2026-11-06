@@ -11,11 +11,11 @@
 # a software PWM at 50 Hz in 16 steps: 15 is dark for 1/16 of every 20 ms, 16 never is. A camera with a short
 # exposure can catch the dark moment, so this script uses 16, or 0: never anything in between.
 #
-# GROUP: which LEDs the mode drives. -1: all 16. 0..3: only a quarter, 4 LEDs (2 in the front row, 2 in the back
-# row) at least 18 mm apart, because at 8 mm (neighbours) a phone camera cannot tell the LEDs from each other: their
-# glows run together. Front LED i belongs to quarter i % 4, back LED i to quarter (i + 2) % 4 - SO THAT, IF THE
-# INDEX RUNS THE SAME WAY ALONG BOTH ROWS, the four are on a lattice of 16 mm x 16 mm (front columns g and g + 4,
-# back columns g + 2 and g + 6). The four quarters together are the 16 LEDs. The LEDs not in the group stay dark.
+# GROUP: which LEDs the mode drives. -1: all 16. 0..3: only 4 of them, ALIGNED on one row and 16 mm apart
+# (every other LED of the row: indices 0, 2, 4, 6 or 1, 3, 5, 7), because at 8 mm (neighbours) a phone camera cannot
+# tell the LEDs from each other: their glows run together. 0: front row, even indices; 1: front row, odd; 2: back row,
+# even; 3: back row, odd. Four LEDs on a straight line at even spacing is also what the page uses as a filter: a false
+# spot is unlikely to fall on that line. The four groups together are the 16 LEDs. The LEDs not in the group stay dark.
 #
 # "blink": the LEDs of the group on for HALF_MS, off for HALF_MS, and so on. The page looks for a pixel that does this
 # (lockin.js); HALF_MS must be the same there (src/script.js: tests/script.test.js checks it). The beat is kept
@@ -35,8 +35,8 @@ back = [thymio.LEDS_LEGO_BACK(i) for i in range(8)]
 
 def show(level):
     for i in range(8):
-        front[i].intensity(level if GROUP < 0 or i % 4 == GROUP else 0)
-        back[i].intensity(level if GROUP < 0 or i % 4 == (GROUP + 2) % 4 else 0)
+        front[i].intensity(level if GROUP < 0 or (GROUP < 2 and i % 2 == GROUP) else 0)
+        back[i].intensity(level if GROUP < 0 or (GROUP >= 2 and i % 2 == GROUP - 2) else 0)
 
 
 if MODE == "blink":

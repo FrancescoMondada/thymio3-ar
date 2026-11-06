@@ -8,6 +8,8 @@ import { startCamera, exposureInfo, setExposure } from './camera.js';
 import { startDemo } from './demo.js';
 import { viewAngleDeg, AngleTable } from './angle.js';
 import { LockIn } from './lockin.js';
+import { PairDiff } from './pairdiff.js';
+import { pickAligned } from './aligned.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, hzOf, windowOf, countOf, buildScript } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
 
@@ -18,14 +20,18 @@ const params = new URLSearchParams(location.search);
 const canvas = $('view');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
+const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
 const lock = new LockIn({ hz: hzOf(HALF_MS), windowMs: windowOf(HALF_MS), computeEvery: 90 });    // the sums are done at most every 90 ms: the pictures are all kept
 
-// detect: 'blink' (the LEDs that blink at the robot's rhythm) or 'bright' (the bright spots of each picture)
-const state = { cam: null, facing: 'environment', demo: false, detect: params.get('detect') === 'bright' ? 'bright' : 'blink', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: 480,
+// detect: 'diff' (what turns on or off between two pictures half a period apart: pairdiff.js), 'blink' (what blinks at the
+// robot's rhythm over a second: lockin.js, needs a phone that does not move) or 'bright' (the bright spots of each picture)
+const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: 480,
   halfMs: HALF_CHOICES.includes(Number(params.get('half'))) ? Number(params.get('half')) : HALF_MS,        // the LEDs blink this long on, this long off
-  group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0 };   // 0..3: a quarter of the LEDs (4, well apart); -1: the 16
-const expected = () => (state.detect === 'blink' || robot.on ? countOf(state.group) : 16);    // how many points there should be
+  group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0 };   // 0..3: 4 LEDs aligned on one row, 16 mm apart; -1: the 16
+const expected = () => (state.detect !== 'bright' || robot.on ? countOf(state.group) : 16);    // how many points there should be
 const blinkHz = () => hzOf(state.halfMs);
+const groupLabel = (g) => (g < 0 ? 'les 16 LED' : `4 LED alignées, rangée ${g < 2 ? 'avant' : 'arrière'} ${g % 2 ? 'B' : 'A'}`);
+const alignOn = () => expected() === 4;                         // 4 LEDs on a line: the line is a filter
 
 // what is measured, over the last frames
 const win = {
@@ -92,10 +98,13 @@ function tick(cam, now, meta) {
     const b = performance.now();
     // two ways to find the LEDs: the ones that BLINK at the robot's rhythm (lockin.js: steady lights of any kind are
     // ignored), or the bright spots in each picture (detect.js)
-    const blink = state.detect === 'blink';
+    const blink = state.detect !== 'bright';                       // looking for LEDs that blink: by difference or by lock-in
     const size = { minArea: 2, maxArea: Math.max(50, (W * H) / 150) };
     let res;
-    if (blink) {
+    if (state.detect === 'diff') {
+      const t = meta.captureTime != null ? meta.captureTime : now;
+      res = pdiff.push(img.data, W, H, t) ? pdiff.find(state.blinkThreshold, size) : { spots: [], brightest: 0, lit: 0, waiting: true };
+    } else if (blink) {
       if (lock.push(img.data, W, H, meta.captureTime != null ? meta.captureTime : now)) {
         win.cache = finder.findFromValues(state.signal === 'color' ? lock.chroma : lock.amp, W, H, state.blinkThreshold, size);
       }
@@ -104,11 +113,14 @@ function tick(cam, now, meta) {
       res = finder.find(img.data, W, H, state.threshold, { contrast: state.contrast, radius: Math.max(4, Math.round(W / 80)), ...size });
     }
     const c = performance.now();
-    if (state.mask && !res.waiting) { finder.paintMask(img.data); ctx.putImageData(img, 0, 0); }
+    if (state.mask && !res.waiting) { (state.detect === 'diff' ? pdiff : finder).paintMask(img.data); ctx.putImageData(img, 0, 0); }
     // the spots that count: all of them, or the green ones (the 16 Lego LEDs; the ring round the pad and the body
     // LEDs are other colours and also bright); a blinking spot has no colour: they all count
-    const counted = blink || state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
-    drawSpots(res.spots, counted);
+    let counted = blink || state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
+    // 4 LEDs of a row blink: of everything the detector finds, only 3 or 4 spots on a straight line at even gaps are the LEDs
+    const aligned = alignOn() && !res.waiting ? pickAligned(counted) : null;
+    if (aligned) counted = aligned.chosen;
+    drawSpots(res.spots, counted, aligned);
 
     win.read.push(b - a);
     win.find.push(c - b);
@@ -118,7 +130,7 @@ function tick(cam, now, meta) {
       win.weights.push(counted.reduce((s, p) => s + p.weight, 0));
       angles.add(currentAngle(), counted.length);       // zeros count too: "no LED at all from 20°" is the answer, not a gap
     }
-    win.last = { ...res, spots: counted, found: res.spots };
+    win.last = { ...res, spots: counted, found: res.spots, aligned };
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
       if (win.frames.length > 30) win.frames.shift();
@@ -130,7 +142,7 @@ function tick(cam, now, meta) {
 }
 
 // green circle: counted; grey circle: a spot of another colour, not counted
-function drawSpots(spots, counted) {
+function drawSpots(spots, counted, aligned) {
   const k = canvas.width / Math.max(1, canvas.clientWidth);        // canvas pixels per screen pixel
   ctx.lineWidth = 1.5 * k;
   const keep = new Set(counted);
@@ -139,6 +151,13 @@ function drawSpots(spots, counted) {
     ctx.strokeStyle = keep.has(s) ? '#3ddc97' : '#8a93b3';
     ctx.beginPath();
     ctx.arc(s.x, s.y, r, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+  if (aligned && counted.length >= 2) {                             // the line the LEDs are on
+    ctx.strokeStyle = 'rgba(61, 220, 151, 0.6)';
+    ctx.beginPath();
+    ctx.moveTo(counted[0].x, counted[0].y);
+    ctx.lineTo(counted[counted.length - 1].x, counted[counted.length - 1].y);
     ctx.stroke();
   }
 }
@@ -165,19 +184,21 @@ function refreshPanel() {
   const big = $('count');
   big.className = `big ${!state.cam ? 'dim' : steady ? 'ok' : n === 0 ? 'dim' : 'warn'}`;
   big.innerHTML = state.cam ? `${n}<small>sur ${exp}</small>` : '–';
-  const blink = state.detect === 'blink';
-  $('countNote').textContent = !state.cam ? (exp === 16 ? 'Il doit y en avoir 16 (2 rangées de 8).' : `Il doit y en avoir ${exp} (un quart des LED du dessus, bien séparées).`)
-    : win.last.waiting ? `Attente de ${(lock.windowMs / 1000).toFixed(1)} s d'images (au moins ${lock.minFrames}) pour mesurer le clignotement…`
+  const blink = state.detect !== 'bright';
+  $('countNote').textContent = !state.cam ? (exp === 16 ? 'Il doit y en avoir 16 (2 rangées de 8).' : `Il doit y en avoir ${exp} (4 LED d'une rangée du dessus, alignées).`)
+    : win.last.waiting ? (state.detect === 'blink' ? `Attente de ${(lock.windowMs / 1000).toFixed(1)} s d'images (au moins ${lock.minFrames}) pour mesurer le clignotement…` : 'Attente d\'une image assez ancienne pour la comparer…')
     : `Sur les ${counts.count} dernières images : de ${counts.min} à ${counts.max}${blink ? '' : ` (points vus : ${colorsText(win.last.found || [])})`}. ` +
-      (steady ? `Les ${exp} LED sont vues, image après image.`
+      (steady ? `Les ${exp} LED sont vues, image après image${alignOn() ? `, retenues parmi ${(win.last.found || []).length} points parce qu'elles sont alignées` : ''}.`
         : n === 0 ? (blink ? `Aucun point ne clignote à ${blinkHz().toFixed(1)} Hz : le robot clignote-t-il (bouton Robot, LED clignotantes) ? seuil trop haut ?` : 'Rien au-dessus du seuil : LED éteintes ? seuil trop haut ?')
+        : n === 0 && alignOn() && (win.last.found || []).length > 0 ? `${win.last.found.length} point(s) trouvé(s), mais pas 3 alignés à intervalles réguliers : ce sont des parasites, ou les LED sont cachées ou collées.`
         : n < exp ? (blink ? `Moins de ${exp} : LED cachées ou collées, image qui bouge trop, seuil trop haut ; ou le robot ne clignote pas encore.` : `Moins de ${exp} : LED éteintes ou cachées, ou points collés (essayez 960 / 1280 px, ou rapprochez-vous).`)
         : n === exp ? `Le compte est bon à cet instant mais pas stable : ${counts.min} à ${counts.max} (une LED se perd ou un point s'ajoute de temps en temps).`
         : (blink ? `Plus de ${exp} : quelque chose d'autre clignote ou la scène bouge ; remontez le seuil.` : `Plus de ${exp} : des reflets ? remontez le seuil.`));
 
-  $('detectNote').textContent = state.detect === 'blink' && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : la détection par clignotement ne verra rien (choisissez « LED clignotantes »).'
+  $('detectNote').textContent = blink && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : cette détection ne verra rien (choisissez « LED clignotantes »).'
     : state.detect === 'bright' && robot.on && robot.mode === 'blink' ? 'Les LED clignotent : la détection par luminosité ne les voit qu\'une image sur deux (choisissez « allumées en continu »).'
-    : state.detect === 'blink' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter.' : '';
+    : state.detect === 'diff' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection compare deux images : le téléphone peut bouger.'
+    : state.detect === 'blink' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection regarde une seconde de suite : le téléphone doit rester posé, sinon elle ne voit rien.' : '';
   $('ampMax').textContent = state.cam ? String(win.last.brightest) : '–';
   const ang = currentAngle();
   $('angle').textContent = state.cam ? (Number.isFinite(ang) ? `${Math.round(ang)}°` : 'n/d') : 'n/d';
@@ -203,7 +224,7 @@ function refreshPanel() {
   $('speedNote').textContent = (!Number.isFinite(tot) ? ''
     : Number.isFinite(fin) && fout < fin * 0.9 ? `L'analyse (${fmt(tot, 1)} ms) est plus lente que la caméra : des images sont sautées.`
     : `L'analyse prend ${fmt(tot, 1)} ms par image${Number.isFinite(fin) ? `, la caméra en donne une toutes les ${fmt(1000 / fin, 0)} ms` : ''}.`) +
-    (state.detect === 'blink' && state.cam && Number.isFinite(perPeriod) && perPeriod > 0
+    (blink && state.cam && Number.isFinite(perPeriod) && perPeriod > 0
       ? ` Images analysées par période de clignotement : ${fmt(perPeriod, 1)} (il en faut au moins 5${perPeriod < 5 ? ` : ralentissez le clignotement ou baissez la taille analysée` : ''}).` : '');
 
   const cam = state.cam;
@@ -231,8 +252,9 @@ function report() {
     `caméra: ${state.cam ? `${state.cam.label} ${state.cam.settings.width}x${state.cam.settings.height} @${state.cam.settings.frameRate ?? '?'}` : 'non démarrée'}${state.demo ? ' (SCÈNE SIMULÉE)' : ''}`,
     `requestVideoFrameCallback: ${typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype ? 'oui' : 'non'}`,
     `Web Bluetooth: ${'bluetooth' in navigator ? 'oui' : 'non'}`,
-    `détection: ${state.detect === 'blink' ? `par clignotement (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${state.group < 0 ? 'les 16 LED' : `quart ${state.group + 1} (4 LED)`}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
+    `détection: ${state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
+    `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
     `images reçues/s: ${fmt(cameraFps(), 1)}  analysées/s: ${fmt(win.rateOut.perSecond, 1)}  par période de clignotement: ${fmt((win.rateOut.perSecond * 2 * state.halfMs) / 1000, 1)}`,
     `retard caméra→page: ${latency.count ? `${fmt(latency.mean, 0)} ms (${win.latencyKind})` : 'n/d'}`,
     `lecture de l'image: moy ${fmt(read.mean, 1)} max ${fmt(read.max, 1)} ms`,
@@ -270,7 +292,7 @@ async function start(kind) {
     if (!state.demo) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
     const cam = state.demo
-      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), halfMs: () => state.halfMs, group: () => state.group })
+      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), halfMs: () => state.halfMs, group: () => state.group })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     resetWindows();
@@ -329,7 +351,7 @@ async function toggleExposure() {
 // The script on the robot (py/leds_lego.py) has three modes for the 16 top LEDs: blinking (what the blink detection
 // looks for), on, off. Changing the mode while it runs sends the script again.
 const robot = { api: null, on: false, mode: null, busy: false, text: 'non connecté' };
-const groupText = (g) => (g < 0 ? 'les 16 LED' : `un quart des LED (4, bien séparées : quart ${g + 1})`);
+const groupText = (g) => (g < 0 ? 'les 16 LED' : `4 LED alignées (rangée ${g < 2 ? 'avant' : 'arrière'}, une sur deux, ${g % 2 ? 'B' : 'A'})`);
 const robotNote = (text, cls = 'dim') => { $('robotNote').textContent = text; $('robotNote').className = `note ${cls}`; robot.text = text; };
 const modeNote = (mode, g, halfMs) => ({
   blink: `Script lancé : ${groupText(g)} clignotent (${hzOf(halfMs).toFixed(1)} Hz : ${halfMs} ms allumées, ${halfMs} ms éteintes), les autres du dessus restent éteintes.`,
@@ -405,6 +427,8 @@ function applyBlink() {
   lock.hz = blinkHz();
   lock.windowMs = windowOf(state.halfMs);
   lock.reset();
+  pdiff.halfMs = state.halfMs;
+  pdiff.reset();
   resetWindows();
   resetAngles();
 }
@@ -436,15 +460,17 @@ function setDetect(mode) {
   $('detect').value = mode;
   $('signal').value = state.signal;
   lock.reset();
+  pdiff.reset();
   resetWindows();
   resetAngles();
-  for (const el of document.querySelectorAll('[data-for]')) el.style.display = el.dataset.for === mode ? '' : 'none';
+  for (const el of document.querySelectorAll('[data-for]')) el.style.display = el.dataset.for.split(' ').includes(mode) ? '' : 'none';
 }
 $('ledGroup').value = String(state.group);
 $('blinkSpeed').value = String(state.halfMs);
 $('procSize').value = String(state.procSize);
 lock.hz = blinkHz();
 lock.windowMs = windowOf(state.halfMs);
+pdiff.halfMs = state.halfMs;
 setDetect(state.detect);
 
 if (!('bluetooth' in navigator)) robotNote('Pas de Web Bluetooth dans ce navigateur (sur iPad : Bluefy). La caméra se teste quand même, avec les LED allumées autrement.');

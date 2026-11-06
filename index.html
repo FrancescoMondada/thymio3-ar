@@ -59,7 +59,7 @@
         <canvas id="view" width="640" height="360"></canvas>
         <div id="splash">
           <h1>Test : retrouver les LED du Thymio avec la caméra</h1>
-          <p>Posez le robot sur la table, quelques LED du dessus qui clignotent (le bouton « Robot » plus bas les fait clignoter : un quart des 16, bien séparées, car côte à côte elles se confondent). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
+          <p>Posez le robot sur la table, quelques LED du dessus qui clignotent (le bouton « Robot » plus bas les fait clignoter : 4 LED alignées d'une rangée, une sur deux, car côte à côte elles se confondent). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
           <div class="row">
             <button class="primary" id="startBack">Caméra arrière</button>
             <button id="startFront">Caméra avant</button>
@@ -97,7 +97,8 @@
           <h2>Réglages</h2>
           <label>Détection
             <select id="detect">
-              <option value="blink" selected>par clignotement (LED clignotantes)</option>
+              <option value="diff" selected>par différence de deux images (le téléphone peut bouger)</option>
+              <option value="blink">par clignotement sur 1 s (téléphone posé)</option>
               <option value="bright">par luminosité (LED fixes)</option>
             </select>
           </label>
@@ -110,16 +111,19 @@
               <option value="960">960 px</option>
             </select>
           </label>
-          <div data-for="blink">
-            <label>Signal du clignotement
-              <select id="signal">
-                <option value="color" selected>couleur (résiste au tremblement)</option>
-                <option value="any">toute variation (plus sensible)</option>
-              </select>
-            </label>
-            <label for="blinkThreshold" style="min-height:0">Seuil de clignotement : <b id="blinkThresholdValue">50</b> <span class="dim">(réponse max vue : <span id="ampMax">–</span>)</span></label>
+          <div data-for="blink diff">
+            <div data-for="blink">
+              <label>Signal du clignotement
+                <select id="signal">
+                  <option value="color" selected>couleur (résiste au tremblement)</option>
+                  <option value="any">toute variation (plus sensible)</option>
+                </select>
+              </label>
+            </div>
+            <label for="blinkThreshold" style="min-height:0">Seuil : <b id="blinkThresholdValue">50</b> <span class="dim">(réponse max vue : <span id="ampMax">–</span>)</span></label>
             <input id="blinkThreshold" type="range" min="15" max="150" value="50" />
-            <p class="note" style="margin:0 0 4px">Un point compte s'il s'allume et s'éteint au rythme du robot (fenêtre de 2,5 périodes). Tout ce qui est fixe, même très brillant, est ignoré.</p>
+            <p class="note" data-for="diff" style="margin:0 0 4px">Un point compte si son vert monte ou descend entre deux images d'âges voisins d'une demi-période : le corps, la table et les lumières fixes ne changent pas. Marche quand le téléphone bouge.</p>
+            <p class="note" data-for="blink" style="margin:0 0 4px">Un point compte s'il s'allume et s'éteint au rythme du robot sur une fenêtre de 2,5 périodes, sans bouger d'un pixel : il faut poser le téléphone.</p>
           </div>
           <div data-for="bright">
           <label>Points comptés
@@ -158,10 +162,10 @@
           </label>
           <label>Lesquelles
             <select id="ledGroup">
-              <option value="0" selected>quart 1 (4 LED écartées)</option>
-              <option value="1">quart 2 (4 LED écartées)</option>
-              <option value="2">quart 3 (4 LED écartées)</option>
-              <option value="3">quart 4 (4 LED écartées)</option>
+              <option value="0" selected>4 alignées : avant A</option>
+              <option value="1">4 alignées : avant B</option>
+              <option value="2">4 alignées : arrière A</option>
+              <option value="3">4 alignées : arrière B</option>
               <option value="-1">les 16</option>
             </select>
           </label>
