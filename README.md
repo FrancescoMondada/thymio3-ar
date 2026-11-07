@@ -22,6 +22,22 @@ de la rangée ; ensemble, les 16). Le clignotement est de **2,5 Hz** par défaut
 1,25 à 7,5 Hz) : `src/py/leds_lego.py`, mode `blink`. Pas besoin de connaître la phase ni de synchroniser la caméra et le
 robot, et à 2,5 Hz une demi-période dure environ 6 images de caméra.
 
+- **Par suivi d'une carte du plan** (par défaut depuis le neuvième essai : `src/homography.js`, `src/evidence.js`, `src/tracker.js`). Reprise à la base,
+  « prédire puis vérifier » au lieu de « détecter puis filtrer ». **L'état est une seule chose : l'homographie H** du plan du robot (mm) vers l'image (px) :
+  avec elle, chacune des 4 LED de la rangée et chacun des 4 arcs a une place prédite, à n'importe quel zoom et quelle inclinaison, et l'échelle est une
+  propriété de H, pas un nombre mesuré sur la rangée. À chaque image, le suivi pose **une question par place** (« y a-t-il une réponse ici ? », dans les cartes
+  de la différence, de la couleur du jeu : `blobNear`, rayon de quelques mm autour de la place, plus une part pour la vitesse du téléphone) puis **ajuste H sur
+  les réponses**. Plus de seuil sur toute l'image, plus de liste de candidats, plus de fenêtres aux marges du pire cas. Détails : (1) **réponses fraîches et
+  anciennes** : P (ce qui vient de s'allumer) dit où est un jeu *maintenant*, N (ce qui vient de s'éteindre) où il *était* il y a 0,1 à 0,3 s ; comme la sortie
+  réelle est le maximum sur plusieurs images plus anciennes, un jeu allumé répond aussi dans N, à son ancienne place, aussi fort : P est pris dès qu'il répond de
+  façon comparable (≥ 60 % de N), N seulement pour le jeu qui vient de s'éteindre. (2) Les deux jeux clignotant à tour de rôle, chaque image n'a qu'un jeu frais :
+  **l'anneau allumé corrige toute la carte** (4 points : homographie par RANSAC ; 3 : correction affine), **la rangée allumée, sur une droite, ne la décale que
+  d'une translation**. (3) **Cohérence** : avec 4 points une carte n'a aucune redondance (4 points s'ajustent toujours), donc une réponse dont le déplacement
+  par rapport à la prévision n'est pas proche du déplacement médian est écartée (une tache parasite ne tire pas la carte). (4) **Seuil qui suit** : une réponse
+  compte au-dessus de max(20, 30 % de la force avec laquelle le jeu répond d'habitude). (5) **Initialisation** par `locate` (4 coins du carré, ou 3 coins +
+  les hypothèses du 4ᵉ) : un carré se ressemble tourné d'un quart, donc les 4 tours et les 2 sens de la rangée (`mirror`, retenu : c'est une propriété du robot)
+  sont essayés, et la carte n'est acceptée que si **au moins 6 des 8 places répondent** et que la rangée tombe sur les spots vus. (6) Perdue après 8 images
+  sans correction ; reprise aussitôt par `locate`. Sortie : H, échelle, nombre de réponses par jeu, écart, état (acquise / suivie / dérive / perdue).
 - **Par différence de deux images** (par défaut, `src/pairdiff.js`). Pour chaque image, la page garde le *vert en excès*
   `max(0, G − max(R, B))` de chaque pixel et le compare aux images vieilles de 0,4 à 1,6 demi-période : ce qui **monte** (LED
   allumée maintenant, à sa place maintenant) ou **descend** (LED allumée avant, à sa place d'alors) est une LED. Le corps, la
@@ -184,6 +200,17 @@ calculé à partir de ce polygone, n'était que la bande entre les deux extrémi
 bas ne regardait pas là, alors que le test d'appartenance (`inside`) était juste. En vue de dessus, l'arc du haut était juste au bord de cette bande.
 Corrigé (le contour est un vrai stade convexe à distance D du segment, le rectangle est celui du stade) avec des tests qui auraient attrapé le défaut :
 contour convexe et à distance D, tout point intérieur est dans le rectangle, pour les trois fenêtres.
+
+**Neuvième étape** (2026-11-07, version après d609000 : suivi d'une carte du plan ; **pas encore essayée sur le téléphone**). Mesures sur scène synthétique (les
+cartes P et N dessinées d'après la géométrie du robot et un modèle de caméra, avec les fantômes de la vraie sortie) : main qui balance : 100 % d'images complètes
+(8 réponses), les places prédites à 0,2 px près (médiane), 4 px (90 %), 7 px au plus ; 12 images par seconde : 97 % ; 3 arcs visibles : suivi dans 99 % des images et
+le 4ᵉ arc, invisible, prédit à moins de 8 px ; arcs à moitié de lumière (50 sur 255) : 96 % complètes, à un tiers (36) : suivi mais carte moins exacte (75 % complètes) ;
+zoom de 150 à 450 mm : ≥ 93 % des images avec 7 réponses ; taches parasites deux fois plus fortes que les LED (6 par carte) : 91 % ; main une fois et demie plus vite :
+≥ 97 % suivies ; **deux fois plus vite** (50 °/s en continu) : la carte dérive pendant que la rangée est allumée (translation seule) et se perd si l'initialisation n'est pas
+refaite ; la reprise par `locate` l'assure dans la page. Dans le volet (`?demo&blink&extra&sway=20&elev=60`) : 618 images, **1 acquisition, 0 perte, 100 % suivies,
+8 réponses sur 8 à chaque image** (alors que la même scène avait 28 acquisitions en 45 s avant la correction « P d'abord ») ; initialisé depuis 3 arcs avec un arc presque
+éteint (`&arcdim=3&dimgain=0.1`) : 1 acquisition, 0 perte, 7 réponses sur 8. Ce qui reste : la prédiction par le **gyroscope du téléphone** (pour suivre les mouvements
+rapides pendant que la rangée est allumée), l'IMU du robot, la pose (inclinaison et distance) tirée de H avec une focale approchée.
 
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script

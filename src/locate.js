@@ -89,7 +89,7 @@ export function locate({ line = [], ring = [], group = 0, wantLine = true, wantR
           if (sq.full) { square = sq; rescued = 'complete'; if (!predicted) predicted = 'ring-from-arcs'; break outer; }
         }
       }
-      if (!ringOk()) square = { chosen: part.chosen, full: false, partial: true, predicted: part.predicted };
+      if (!ringOk()) square = { chosen: part.chosen, full: false, partial: true, predicted: part.predicted, hypotheses: part.hypotheses };
     }
   }
 

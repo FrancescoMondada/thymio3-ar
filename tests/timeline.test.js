@@ -75,3 +75,13 @@ test('the gap between two LEDs of a group, in px, is averaged per slice (the dis
   tl2.add(0, { row: true });
   assert.ok(Number.isNaN(tl2.bins()[0].gap));
 });
+
+test('the share of pictures where the map was tracked is a column of its own (null: the tracking was not asked for)', () => {
+  const tl = new Timeline();
+  for (let i = 0; i < 10; i++) tl.add(i * 100, { row: true, ring: true, tracked: i < 7 });
+  assert.equal(tl.bins()[0].trackedPct, 70);
+  assert.equal(tl.totals().trackedPct, 70);
+  const tl2 = new Timeline();
+  tl2.add(0, { row: true });
+  assert.ok(Number.isNaN(tl2.bins()[0].trackedPct));
+});

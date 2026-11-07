@@ -14,6 +14,7 @@ import { pickSquare } from './square.js';
 import { locate } from './locate.js';
 import { Timeline } from './timeline.js';
 import { nextSize } from './autosize.js';
+import { Tracker } from './tracker.js';
 import { ROW_GAP } from './layout.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
@@ -26,19 +27,24 @@ const canvas = $('view');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
 const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
+const tracker = new Tracker();                                       // the map of the robot's plane to the picture, tracked (tracker.js)
+const trackLog = { acquisitions: 0, losses: 0, state: 'idle', rotation: null, recent: [] };       // recent: what the last pictures did (for the console: window.thymioAR)
+window.thymioAR = { tracker, trackLog, get state() { return state; } };
 const SEEN_PEAK = 25;                                                 // a response (0..255) under this in both sets: nothing blinks in the picture (the phone points away from the robot)
 const timeline = new Timeline();                                     // what happened over the whole test, in slices of 10 s (for the report)
 const pdiffAmber = new PairDiff({ halfMs: HALF_MS, measure: 'amber' });    // the same for the amber arcs of the ring
 const lock = new LockIn({ hz: hzOf(HALF_MS), windowMs: windowOf(HALF_MS), computeEvery: 90 });    // the sums are done at most every 90 ms: the pictures are all kept
 
-// detect: 'diff' (what turns on or off between two pictures half a period apart: pairdiff.js), 'blink' (what blinks at the
+// detect: 'track' (the default: 'diff' plus a map of the robot's plane to the picture that is tracked: tracker.js), 'diff' (what turns on or off between two pictures half a period apart: pairdiff.js), 'blink' (what blinks at the
 // robot's rhythm over a second: lockin.js, needs a phone that does not move) or 'bright' (the bright spots of each picture)
-const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, ringThreshold: Number(params.get('ringthr')) || 80, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: [320, 480, 640, 960].includes(Number(params.get('size'))) ? Number(params.get('size')) : 480, procAuto: !params.has('size'),
+const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright', 'diff'].includes(params.get('detect')) ? params.get('detect') : 'track', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, ringThreshold: Number(params.get('ringthr')) || 80, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: [320, 480, 640, 960].includes(Number(params.get('size'))) ? Number(params.get('size')) : 480, procAuto: !params.has('size'),
   halfMs: HALF_CHOICES.includes(Number(params.get('half'))) ? Number(params.get('half')) : HALF_MS,        // the LEDs blink this long on, this long off
   group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0,    // Lego LEDs: 0..3: 4 aligned on one row, 16 mm apart; -1: the 16; -2: none
   circle: CIRCLES.includes(Number(params.get('circle'))) && params.has('circle') ? Number(params.get('circle')) : 1 };    // ring arcs: 1: NE SE SW NW (a square, sides parallel to the row); 0: N E S W; -1: none. With a group they blink in turn
 const lineOn = () => state.group !== -2;                               // the Lego LEDs are asked for
-const squareOn = () => state.detect === 'diff' && state.circle >= 0;     // the ring arcs, looked for by the difference only (amber)
+const diffMode = () => state.detect === 'diff' || state.detect === 'track';       // looks at the pair differences
+const trackOn = () => state.detect === 'track' && state.group >= 0 && state.circle >= 0;
+const squareOn = () => diffMode() && state.circle >= 0;     // the ring arcs, looked for by the difference only (amber)
 const expectedLine = () => (state.detect !== 'bright' || robot.on ? (lineOn() ? countOf(state.group) : 0) : 16);
 const expected = () => expectedLine() + (squareOn() ? 4 : 0);          // how many points there should be
 const blinkHz = () => hzOf(state.halfMs);
@@ -60,6 +66,7 @@ function resetWindows() {
   win.read = new Rolling(30); win.find = new Rolling(30); win.latency = new Rolling(30);
   win.rateOut = new Rate(30); win.frames = [];
   win.cache = null;                               // the last result of the blink detection (the sums are not done on every picture)
+  tracker.reset();                                // the map is in pixels of the picture analysed: a new size, a new map
   // what each set does, over the last 60 pictures: candidates found, whether it was picked, whether the other set's prediction saved it, the
   // strongest response, and the scale (px per mm) measured
   win.diag = { rowCand: new Rolling(60), rowOk: new Rolling(60), rowPeak: new Rolling(60), ringCand: new Rolling(60), ringOk: new Rolling(60), ringPeak: new Rolling(60), rescued: new Rolling(60), unseen: new Rolling(60), scale: new Rolling(60), mismatch: new Rolling(60) };
@@ -136,9 +143,9 @@ function tick(cam, now, meta) {
     // (once one set gives the scale, locate() takes its minimum sizes from it)
     const size = { minArea: 2, maxArea: Math.max(50, (W * H) / 150) };
     const arcSize = { minArea: 4, maxArea: Math.max(80, (W * H) / 20), minFill: 0.1, maxAspect: 8 };
-    let res, loc = null, peakLine = 0, peakRing = 0;
+    let res, loc = null, tr = null, peakLine = 0, peakRing = 0;
     const tag = (spots, set) => { for (const sp of spots) sp.set = set; return spots; };
-    if (state.detect === 'diff') {
+    if (diffMode()) {
       // two sets can blink: the Lego LEDs (green) and the ring arcs (amber: their own threshold, looser shape limits)
       const t = meta.captureTime != null ? meta.captureTime : now;
       let waiting = false, brightest = 0;
@@ -161,6 +168,19 @@ function tick(cam, now, meta) {
           retryRing: squareOn() ? (w) => tag(pdiffAmber.find(Math.max(25, Math.round(state.ringThreshold * 0.45)), arcSize, w).spots, 'ring') : null,
           retryLine: lineOn() ? (w) => tag(pdiff.find(Math.max(20, Math.round(state.blinkThreshold * 0.6)), size, w).spots, 'line') : null,
         });
+        // the map of the plane: one place asked for each LED and each arc, the answers fit the map again (tracker.js). locate() above is how it is
+        // found the first time, and again when it is lost
+        if (trackOn()) {
+          tr = tracker.update({
+            maps: { green: [pdiff.P, pdiff.N], amber: [pdiffAmber.P, pdiffAmber.N] }, w: W, h: H, group: state.group, circle: state.circle, motion: Number.isFinite(currentMotion()) ? currentMotion() : 0,
+            found: { rings: ringsFor(loc.square), row: loc.aligned && loc.aligned.chosen.length >= 3 ? loc.aligned.chosen : null },
+          });
+          if (tr.state === 'acquire') trackLog.acquisitions++;
+          if (tr.state === 'lost' && trackLog.state !== 'lost' && trackLog.state !== 'idle') trackLog.losses++;
+          trackLog.state = tr.state; trackLog.rotation = tr.rotation; trackLog.last = tr;
+          trackLog.recent.push(`${tr.state[0]}${tr.rowMatched}${tr.ringMatched}${tr.points.filter((o) => o.rejected).length ? 'x' : ''}`);
+          if (trackLog.recent.length > 80) trackLog.recent.shift();
+        } else if (state.detect === 'track') { tracker.reset(); trackLog.state = 'idle'; }
       }
     } else if (blink) {
       if (lock.push(img.data, W, H, meta.captureTime != null ? meta.captureTime : now)) {
@@ -172,7 +192,7 @@ function tick(cam, now, meta) {
     }
     const c = performance.now();
     if (state.mask && !res.waiting) {
-      if (state.detect !== 'diff') finder.paintMask(img.data);
+      if (!diffMode()) finder.paintMask(img.data);
       else { if (lineOn()) pdiff.paintMask(img.data); if (squareOn()) pdiffAmber.paintMask(img.data); }
       ctx.putImageData(img, 0, 0);
     }
@@ -187,7 +207,11 @@ function tick(cam, now, meta) {
       aligned = loc.aligned; square = loc.square;
       counted = [...(aligned ? aligned.chosen : counted.filter((sp) => sp.set !== 'ring')), ...(square ? square.chosen : [])];
     } else if (alignOn() && !res.waiting) { aligned = pickAligned(counted); counted = aligned.chosen; }
-    drawSpots(res.spots, counted, aligned, square, loc?.window);
+    // tracking: what counts is what answers at the places the map predicts (centres of the answers); the windows of locate() are not drawn
+    if (tr && tr.tracking) {
+      counted = tr.points.filter((o) => o.matched && o.inlier !== false).map((o) => ({ x: o.blob.x, y: o.blob.y, area: o.blob.area, weight: o.v, set: o.set === 'row' ? 'line' : 'ring', color: 'clignotant' }));
+      drawSpots(res.spots, counted, null, null, null, tr);
+    } else drawSpots(res.spots, counted, aligned, square, loc?.window);
 
     win.read.push(b - a);
     win.find.push(c - b);
@@ -201,23 +225,25 @@ function tick(cam, now, meta) {
     }
     let sceneScale = NaN;
     if (loc) {
-      const sc0 = loc.scales?.row ?? loc.scales?.ringMean;
+      const sc0 = tr && tr.tracking ? tr.scale : loc.scales?.row ?? loc.scales?.ringMean;
       sceneScale = Number.isFinite(sc0) ? sc0 : NaN;
       const d = win.diag, lineCand = res.spots.filter((sp) => sp.set === 'line').length, ringCand = res.spots.filter((sp) => sp.set === 'ring').length;
-      if (lineOn()) { d.rowCand.push(lineCand); d.rowOk.push(alignOn() ? (aligned?.chosen.length >= 3 ? 1 : 0) : lineCand >= 1 ? 1 : 0); d.rowPeak.push(peakLine); }
-      if (squareOn()) { d.ringCand.push(ringCand); d.ringOk.push(square?.full ? 1 : 0); d.ringPeak.push(peakRing); }
+      const trk = tr && tr.tracking;                                   // tracking: found = 3 or more of the 4 answer at their places
+      const rowFound = trk ? tr.rowMatched >= 3 : alignOn() ? (aligned?.chosen.length ?? 0) >= 3 : lineCand >= 1, ringFound = trk ? tr.ringMatched >= 3 : !!square?.full;
+      if (lineOn()) { d.rowCand.push(lineCand); d.rowOk.push(rowFound ? 1 : 0); d.rowPeak.push(peakLine); }
+      if (squareOn()) { d.ringCand.push(ringCand); d.ringOk.push(ringFound ? 1 : 0); d.ringPeak.push(peakRing); }
       timeline.add(now, {
-        row: lineOn() ? (alignOn() ? (aligned?.chosen.length ?? 0) >= 3 : lineCand >= 1) : null, ring: squareOn() ? !!square?.full : null,
+        row: lineOn() ? rowFound : null, ring: squareOn() ? ringFound : null, tracked: state.detect === 'track' ? !!trk : null,
         rescued: !!loc.rescued, rowPeak: peakLine, ringPeak: peakRing, motion: currentMotion(), seen: Math.max(peakLine, peakRing) >= SEEN_PEAK,
         gap: Number.isFinite(sceneScale) ? ROW_GAP * sceneScale : NaN,
         cfg: `${state.blinkThreshold}/${state.ringThreshold}/${state.procSize}${state.procAuto ? 'a' : ''}/${state.group}/${state.circle}/${state.halfMs}/${exposureTag()}`,
       });
       d.unseen.push(Math.max(peakLine, peakRing) < SEEN_PEAK ? 1 : 0);
-      d.rescued.push(loc.rescued ? 1 : 0);
+      d.rescued.push(loc.rescued && !trk ? 1 : 0);
       d.mismatch.push(loc.mismatch ? 1 : 0);
       if (Number.isFinite(sceneScale)) d.scale.push(sceneScale);
     }
-    win.last = { ...res, spots: counted, found: res.spots, aligned, square, loc };
+    win.last = { ...res, spots: counted, found: res.spots, aligned, square, loc, tracker: tr };
     if (loc) maybeAutoSize(now);
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
@@ -229,20 +255,54 @@ function tick(cam, now, meta) {
   schedule(cam);
 }
 
+// the squares the tracker may start from: the 4 corners when 4 arcs were found; when 3 were, one square per hypothesis for the fourth (locate.js), the
+// corners ordered around on the screen
+function ringsFor(sq) {
+  if (!sq) return null;
+  if (sq.full) return [sq.chosen];
+  if (!sq.partial || !sq.hypotheses) return null;
+  return sq.hypotheses.map((h) => {
+    const pts = [...sq.chosen, h.predicted], cx = pts.reduce((a, p) => a + p.x, 0) / 4, cy = pts.reduce((a, p) => a + p.y, 0) / 4;
+    return pts.sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  });
+}
+
 // green circle: counted; grey circle: a spot of another colour, not counted
 // the analysis size follows the scale measured (autosize.js): the gap between two LEDs of a group (16 mm), in pixels, at the size in use
 let lastSizeChange = 0;
 function maybeAutoSize(now) {
   const d = win.diag;
-  if (!state.procAuto || state.detect !== 'diff' || !d || d.unseen.count < 40 || now - lastSizeChange < 6000) return;
+  if (!state.procAuto || !diffMode() || !d || d.unseen.count < 40 || now - lastSizeChange < 6000) return;
   const found = Math.max(lineOn() && d.rowOk.count ? d.rowOk.mean : 0, squareOn() && d.ringOk.count ? d.ringOk.mean : 0);
   const size = nextSize({ size: state.procSize, gapPx: d.scale.count ? ROW_GAP * d.scale.mean : NaN, samples: d.scale.count, foundShare: found, unseenShare: d.unseen.mean });
   if (size !== state.procSize) { state.procSize = size; lastSizeChange = now; }
 }
 
-function drawSpots(spots, counted, aligned, square, window) {
+function drawSpots(spots, counted, aligned, square, window, tr = null) {
   const k = canvas.width / Math.max(1, canvas.clientWidth);        // canvas pixels per screen pixel
   ctx.lineWidth = 1.5 * k;
+  if (tr) {                                                        // the 8 places the map predicts: solid where something answers, dashed where not
+    for (const o of tr.points) {
+      const ok = o.matched && o.inlier !== false, r = Math.max(5 * k, (o.set === 'row' ? 3 : 5) * (tr.scale || 1) + 3 * k);
+      ctx.setLineDash(ok ? [] : [3 * k, 3 * k]);
+      ctx.strokeStyle = ok ? (o.set === 'ring' ? '#ffb454' : '#3ddc97') : 'rgba(255, 107, 107, 0.9)';
+      ctx.beginPath();
+      ctx.arc(ok ? o.blob.x : o.px.x, ok ? o.blob.y : o.px.y, r, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    const pts = (set) => tr.points.filter((o) => o.set === set).map((o) => o.px);
+    for (const [set, colour, close] of [['row', 'rgba(61, 220, 151, 0.6)', false], ['ring', 'rgba(255, 180, 84, 0.6)', true]]) {
+      const p = pts(set);
+      if (p.length < 2) continue;
+      ctx.strokeStyle = colour;
+      ctx.beginPath();
+      p.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+      if (close) ctx.closePath();
+      ctx.stroke();
+    }
+    return;
+  }
   if (window) {                                                    // where the other set said this one must be (dashed)
     ctx.setLineDash([5 * k, 5 * k]);
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
@@ -337,6 +397,7 @@ function refreshPanel() {
   $('advancedSummary').className = ch.length ? 'warn' : '';
   $('detectNote').textContent = blink && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : cette détection ne verra rien (choisissez « LED clignotantes »).'
     : state.detect === 'bright' && robot.on && robot.mode === 'blink' ? 'Les LED clignotent : la détection par luminosité ne les voit qu\'une image sur deux (choisissez « allumées en continu »).'
+    : state.detect === 'track' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection suit une carte du plan du robot : chaque LED et chaque arc est cherché là où la carte le prévoit, la carte est ajustée sur les réponses.'
     : state.detect === 'diff' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection compare deux images : le téléphone peut bouger.'
     : state.detect === 'blink' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection regarde une seconde de suite : le téléphone doit rester posé, sinon elle ne voit rien.' : '';
   $('ampMax').textContent = state.cam ? String(win.last.brightest) : '–';
@@ -392,13 +453,13 @@ function timelineLines() {
   const bins = timeline.bins();
   if (!bins.length) return ['chronologie: n/d'];
   const t = timeline.totals();
-  const out = ['chronologie par tranches de 10 s (images · hors robot [rien ne répond] · puis, sur les images où quelque chose répond : rangée trouvée · arcs trouvés · les deux · sauvées par la prédiction · réponse max rangée/arcs · mouvement du téléphone · écart entre deux LED d\'un groupe en px à la taille analysée):'];
+  const out = ['chronologie par tranches de 10 s (images · hors robot [rien ne répond] · carte suivie · puis, sur les images où quelque chose répond : rangée trouvée · arcs trouvés · les deux · sauvées par la prédiction · réponse max rangée/arcs · mouvement du téléphone · écart entre deux LED d\'un groupe en px à la taille analysée):'];
   let last = null;
   for (const b of bins) {
     if (b.cfg !== last) { out.push(`  réglages ${b.cfg} (seuil rangée/arcs/taille/groupe/cercle/demi-période)`); last = b.cfg; }
-    out.push(`  ${Math.round(b.start / 1000)}–${Math.round(b.end / 1000)} s : ${b.frames} · ${fmt(b.unseenPct, 0, ' %')} · ${fmt(b.rowSeenPct, 0, ' %')} · ${fmt(b.ringSeenPct, 0, ' %')} · ${fmt(b.bothSeenPct, 0, ' %')} · ${fmt(b.rescuedPct, 0, ' %')} · ${Math.round(b.rowPeak)}/${Math.round(b.ringPeak)} · ${fmt(b.motion, 0)} °/s · ${fmt(b.gap, 0)} px`);
+    out.push(`  ${Math.round(b.start / 1000)}–${Math.round(b.end / 1000)} s : ${b.frames} · ${fmt(b.unseenPct, 0, ' %')} · ${fmt(b.trackedPct, 0, ' %')} · ${fmt(b.rowSeenPct, 0, ' %')} · ${fmt(b.ringSeenPct, 0, ' %')} · ${fmt(b.bothSeenPct, 0, ' %')} · ${fmt(b.rescuedPct, 0, ' %')} · ${Math.round(b.rowPeak)}/${Math.round(b.ringPeak)} · ${fmt(b.motion, 0)} °/s · ${fmt(b.gap, 0)} px`);
   }
-  out.push(`  tout : ${t.frames} images, hors robot ${fmt(t.unseenPct, 0, ' %')} ; sur les autres : rangée ${fmt(t.rowSeenPct, 0, ' %')}, arcs ${fmt(t.ringSeenPct, 0, ' %')}, les deux ${fmt(t.bothSeenPct, 0, ' %')} ; sauvées par la prédiction ${fmt(t.rescuedPct, 0, ' %')} (sur toutes les images : rangée ${fmt(t.rowPct, 0, ' %')}, arcs ${fmt(t.ringPct, 0, ' %')}, les deux ${fmt(t.bothPct, 0, ' %')})`);
+  out.push(`  tout : ${t.frames} images, hors robot ${fmt(t.unseenPct, 0, ' %')}, carte suivie ${fmt(t.trackedPct, 0, ' %')} ; sur les autres : rangée ${fmt(t.rowSeenPct, 0, ' %')}, arcs ${fmt(t.ringSeenPct, 0, ' %')}, les deux ${fmt(t.bothSeenPct, 0, ' %')} ; sauvées par la prédiction ${fmt(t.rescuedPct, 0, ' %')} (sur toutes les images : rangée ${fmt(t.rowPct, 0, ' %')}, arcs ${fmt(t.ringPct, 0, ' %')}, les deux ${fmt(t.bothPct, 0, ' %')})`);
   return out;
 }
 
@@ -413,10 +474,11 @@ function report() {
     `caméra: ${state.cam ? `${state.cam.label} ${state.cam.settings.width}x${state.cam.settings.height} @${state.cam.settings.frameRate ?? '?'}` : 'non démarrée'}${state.demo ? ' (SCÈNE SIMULÉE)' : ''}`,
     `requestVideoFrameCallback: ${typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype ? 'oui' : 'non'}`,
     `Web Bluetooth: ${'bluetooth' in navigator ? 'oui' : 'non'}`,
-    `détection: ${state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${lineOn() && squareOn() ? ' en alternance' : ''}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'}/${pdiffAmber.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
+    `détection: ${state.detect === 'track' ? `par suivi d'une carte du plan (différence de deux images, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${lineOn() && squareOn() ? ' en alternance' : ''}, seuils ${state.blinkThreshold}/${state.ringThreshold} pour l'acquisition)` : state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${lineOn() && squareOn() ? ' en alternance' : ''}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'}/${pdiffAmber.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
     `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
+    `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.matched}/${win.last.tracker.expected} répondent (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched})${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s), ${trackLog.losses} perte(s) ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
     `diagnostic arcs: ${squareOn() && win.diag?.ringCand.count ? `carré trouvé dans ${fmt(100 * win.diag.ringOk.mean, 0)} % des images, ${fmt(win.diag.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(win.diag.ringPeak.mean, 0)}, seuil des arcs ${state.ringThreshold}, ${fmt(100 * win.diag.rescued.mean, 0)} % sauvées par la prédiction` : 'n/d'}`,
@@ -594,7 +656,7 @@ addEventListener('pagehide', () => { if (robot.on) robot.api?.stopScriptExecutio
 // ---- settings the user may have touched by accident ----------------------------------------------------------
 // (the sliders are under the thumb when the page is scrolled: in the 6th test the threshold of the arcs went from 80 to 155 in the
 // middle of the run, which looked like an effect of the exposure lock)
-const DEFAULTS = { detect: 'diff', procAuto: true, blinkThreshold: 50, ringThreshold: 80, halfMs: HALF_MS, group: 0, circle: 1, signal: 'color' };
+const DEFAULTS = { detect: 'track', procAuto: true, blinkThreshold: 50, ringThreshold: 80, halfMs: HALF_MS, group: 0, circle: 1, signal: 'color' };
 function changedSettings() {
   const out = [];
   if (state.detect !== DEFAULTS.detect) out.push(`détection « ${state.detect} »`);
