@@ -174,6 +174,17 @@ consécutifs (on ne sait pas lequel des trois est le coin du milieu : chaque hyp
 seuil plus bas ; le carré à 3 arcs est compté 3 sur 4 et le 4ᵉ attendu est dessiné en pointillés (`&arcdim=3&dimgain=0.3` dans la simulation). La règle de
 taille automatique redescend maintenant quand l'écart resterait d'au moins 15 px à la taille inférieure.
 
+**Huitième essai** (2026-11-07 13h58, version 021c987, 193 s, 1361 images, réglages par défaut) : rangée 93 %, arcs 73 %, les deux 73 % (7ᵉ : 48 %),
+61 % sauvées par la prédiction ; images complètes 73 % à 75–90°, 59 % à 60–75°, 49 % à 45–60° ; immobile 63 %, lent 59 %. **La taille automatique a
+oscillé 480 → 640 → 960 → 640 → 960 → 640 → 480 → 640** (chaque changement vide la mémoire du détecteur) et c'est à **960 que c'est le pire** :
+31 %, 56 %, 48 % d'images complètes contre 88 à 99 % à 480 et 640 (et seulement 12 à 15 images analysées par seconde, sous le minimum de 5 par période) :
+l'échelle automatique est maintenant plafonnée à 640 (960 reste au menu). Sur la capture de dessus, **la zone de recherche des arcs était tracée comme un nœud
+papillon** : les deux demi-cercles des extrémités du stade creusaient vers l'intérieur au lieu de déborder. Pire, **le rectangle de recherche** (`bbox`),
+calculé à partir de ce polygone, n'était que la bande entre les deux extrémités de la rangée, sans la marge de D le long d'elle : la recherche à seuil
+bas ne regardait pas là, alors que le test d'appartenance (`inside`) était juste. En vue de dessus, l'arc du haut était juste au bord de cette bande.
+Corrigé (le contour est un vrai stade convexe à distance D du segment, le rectangle est celui du stade) avec des tests qui auraient attrapé le défaut :
+contour convexe et à distance D, tout point intérieur est dans le rectangle, pour les trois fenêtres.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les

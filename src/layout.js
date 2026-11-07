@@ -79,11 +79,17 @@ export function ringWindowFromRow(row, group, { elevDeg = NaN, halfAlongMm = 60,
     const t = Math.max(0, Math.min(1, ((p.x - A.x) * abx + (p.y - A.y) * aby) / ab2));
     return Math.hypot(p.x - (A.x + t * abx), p.y - (A.y + t * aby)) <= Dpx;
   };
+  // the outline of the capsule: a half circle round B that bulges away from A, then one round A that bulges away from B. (The first version
+  // went round the other way: both half circles bulged INTO the capsule, the drawing was a bow tie, and the box round it, which is where the
+  // look with a lower threshold searches, was the band between the two ends of the row, with no margin along it: the user saw the zone
+  // "limited" in the top view, with the top arc on the very edge of that band.)
   const outline = [];
   const ang = Math.atan2(u.y, u.x);
-  for (let i = 0; i <= 12; i++) { const a = ang - Math.PI / 2 - (i * Math.PI) / 12; outline.push({ x: B.x + Dpx * Math.cos(a), y: B.y + Dpx * Math.sin(a) }); }
-  for (let i = 0; i <= 12; i++) { const a = ang + Math.PI / 2 - (i * Math.PI) / 12; outline.push({ x: A.x + Dpx * Math.cos(a), y: A.y + Dpx * Math.sin(a) }); }
-  return { kind: 'ring-from-row', s, inside, bbox: boxOf(outline), outline, minSide: 0.2 * SQUARE_SIDE * s, minGap: 0.25 * ROW_GAP * s, elevDeg, D };
+  for (let i = 0; i <= 12; i++) { const a = ang - Math.PI / 2 + (i * Math.PI) / 12; outline.push({ x: B.x + Dpx * Math.cos(a), y: B.y + Dpx * Math.sin(a) }); }
+  for (let i = 0; i <= 12; i++) { const a = ang + Math.PI / 2 + (i * Math.PI) / 12; outline.push({ x: A.x + Dpx * Math.cos(a), y: A.y + Dpx * Math.sin(a) }); }
+  // the box of a stadium is the box of its segment, D further each way (exact: not the box of the 26 points of the outline)
+  const bbox = { x0: Math.min(A.x, B.x) - Dpx, y0: Math.min(A.y, B.y) - Dpx, x1: Math.max(A.x, B.x) + Dpx, y1: Math.max(A.y, B.y) + Dpx };
+  return { kind: 'ring-from-row', s, inside, bbox, outline, minSide: 0.2 * SQUARE_SIDE * s, minGap: 0.25 * ROW_GAP * s, elevDeg, D };
 }
 
 // Where the row can be, from the 4 corners of the square of arcs (ordered around) -> the same
@@ -96,7 +102,7 @@ export function rowWindowFromRing(corners, group) {
   const radius = 1.3 * farthest * s;
   const inside = (p) => Math.hypot(p.x - c.x, p.y - c.y) <= radius;
   const outline = Array.from({ length: 16 }, (_, i) => ({ x: c.x + radius * Math.cos((i * Math.PI) / 8), y: c.y + radius * Math.sin((i * Math.PI) / 8) }));
-  return { kind: 'row-from-ring', s, inside, bbox: boxOf(outline), outline, minSide: 0.2 * SQUARE_SIDE * s, minGap: 0.25 * ROW_GAP * s };
+  return { kind: 'row-from-ring', s, inside, bbox: { x0: c.x - radius, y0: c.y - radius, x1: c.x + radius, y1: c.y + radius }, outline, minSide: 0.2 * SQUARE_SIDE * s, minGap: 0.25 * ROW_GAP * s };
 }
 
 function boxOf(pts) {
@@ -115,5 +121,5 @@ export function scalesAgree(rowS, ringMeanS, { lo = 0.4, hi = 2.5 } = {}) {
 // a disc window: where a missing corner of the square is expected (same shape as the other windows: inside, bbox, outline)
 export function discWindow(c, radius) {
   const outline = Array.from({ length: 16 }, (_, i) => ({ x: c.x + radius * Math.cos((i * Math.PI) / 8), y: c.y + radius * Math.sin((i * Math.PI) / 8) }));
-  return { kind: 'disc', s: NaN, inside: (p) => Math.hypot(p.x - c.x, p.y - c.y) <= radius, bbox: boxOf(outline), outline, minSide: 0, minGap: 0 };
+  return { kind: 'disc', s: NaN, inside: (p) => Math.hypot(p.x - c.x, p.y - c.y) <= radius, bbox: { x0: c.x - radius, y0: c.y - radius, x1: c.x + radius, y1: c.y + radius }, outline, minSide: 0, minGap: 0 };
 }

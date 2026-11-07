@@ -123,3 +123,62 @@ test('the windows come with what the page needs: a box round them, an outline to
   const far = view(rng(11), { minElev: 40, near: 600, far: 600 });
   assert.ok(ringWindowFromRow(far.rowOf(0), 0).s < 0.7 * w.s);
 });
+
+// ---- the geometry of the windows themselves (a bug here went unseen for 6 tests: the outline and the box round it were wrong) ------------------
+import { discWindow } from '../src/layout.js';
+
+const distToSegment = (p, a, b) => {
+  const abx = b.x - a.x, aby = b.y - a.y, t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / (abx * abx + aby * aby)));
+  return Math.hypot(p.x - (a.x + t * abx), p.y - (a.y + t * aby));
+};
+const convex = (poly) => {
+  const signs = new Set();
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length], c = poly[(i + 2) % poly.length];
+    const t = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(t) > 1e-9) signs.add(Math.sign(t));
+  }
+  return signs.size === 1;
+};
+
+test('the outline of the window from the row is a stadium: convex, every point at the distance D from the segment, and it bulges beyond the ends of the row', () => {
+  const rnd = rng(31);
+  for (let trial = 0; trial < 60; trial++) {
+    const a = rnd() * 2 * Math.PI, gap = 8 + rnd() * 40, x0 = 100 + rnd() * 400, y0 = 100 + rnd() * 400;
+    const row = [0, 1, 2, 3].map((k) => ({ x: x0 + Math.cos(a) * gap * k, y: y0 + Math.sin(a) * gap * k }));
+    const w = ringWindowFromRow(row, trial % 4, { elevDeg: 40 + rnd() * 50 });
+    const m = { x: x0 + Math.cos(a) * gap * 1.5, y: y0 + Math.sin(a) * gap * 1.5 }, half = 60 * (gap / 16);
+    const A = { x: m.x - Math.cos(a) * half, y: m.y - Math.sin(a) * half }, B = { x: m.x + Math.cos(a) * half, y: m.y + Math.sin(a) * half };
+    const Dpx = w.D * (gap / 16);
+    assert.ok(convex(w.outline), `trial ${trial}: convex`);
+    for (const p of w.outline) assert.ok(Math.abs(distToSegment(p, A, B) - Dpx) < 0.01 * Dpx + 0.01, `trial ${trial}: an outline point is ${distToSegment(p, A, B).toFixed(1)} from the segment, D is ${Dpx.toFixed(1)}`);
+    // beyond the ends: the box reaches D past each end of the row along it
+    const along = (p) => (p.x - m.x) * Math.cos(a) + (p.y - m.y) * Math.sin(a);
+    assert.ok(Math.max(...w.outline.map(along)) > half + 0.95 * Dpx, `trial ${trial}: the outline goes D beyond the end B`);
+    assert.ok(Math.min(...w.outline.map(along)) < -half - 0.95 * Dpx, `trial ${trial}: and beyond the end A`);
+  }
+});
+
+test('every point that is inside a window is inside its box (the look with a lower threshold only searches the box): all three windows', () => {
+  const rnd = rng(32);
+  for (let trial = 0; trial < 40; trial++) {
+    const v = view(rnd, { minElev: 20 }), g = trial % 4;
+    const windows = [ringWindowFromRow(v.rowOf(g), g, { elevDeg: v.elev }), rowWindowFromRing(v.ringOf(trial % 2 === 0), g), discWindow({ x: 400 + rnd() * 400, y: 200 + rnd() * 300 }, 10 + rnd() * 60)];
+    for (const w of windows) {
+      let hits = 0;
+      for (let k = 0; k < 4000; k++) {
+        const p = { x: -400 + rnd() * 2400, y: -400 + rnd() * 1600 };
+        if (w.inside(p)) { hits++; assert.ok(p.x >= w.bbox.x0 - 1e-6 && p.x <= w.bbox.x1 + 1e-6 && p.y >= w.bbox.y0 - 1e-6 && p.y <= w.bbox.y1 + 1e-6, `${w.kind}, trial ${trial}: (${p.x.toFixed(0)}, ${p.y.toFixed(0)}) is inside the window but outside its box`); }
+      }
+      assert.ok(hits > 0 || w.kind === 'disc', `${w.kind}: the sample hit the window`);
+    }
+  }
+});
+
+test('the box of the window from the row is the box of the true stadium, not the band between the ends of the row (top-down, vertical row)', () => {
+  const row = [0, 1, 2, 3].map((k) => ({ x: 315, y: 400 + 15 * k }));
+  const w = ringWindowFromRow(row, 0, { elevDeg: 82 });
+  const Dpx = w.D * 15 / 16, half = 60 * 15 / 16, mid = 422.5;
+  assert.ok(Math.abs(w.bbox.x0 - (315 - Dpx)) < 1 && Math.abs(w.bbox.x1 - (315 + Dpx)) < 1);
+  assert.ok(Math.abs(w.bbox.y0 - (mid - half - Dpx)) < 1 && Math.abs(w.bbox.y1 - (mid + half + Dpx)) < 1, `y from ${w.bbox.y0.toFixed(0)} to ${w.bbox.y1.toFixed(0)}`);
+});
