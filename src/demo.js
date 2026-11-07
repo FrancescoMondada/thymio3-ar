@@ -7,7 +7,7 @@
 // together. It does not know how much light an LED gives out sideways (it draws every LED as bright from
 // every side): that is what the test on a real robot is for.
 //
-// `?demo&elev=30` holds the view at 30° instead of swinging. The page tells it which LEDs the robot is asked to light
+// `?demo&elev=30` holds the view at 30° instead of swinging. `&dist=700` puts the camera 700 mm away instead of 380 (the phone of the 8th report: 0.65 px/mm in a picture 640 px long), `&rowgain=0.5` makes the green LEDs half as bright. The page tells it which LEDs the robot is asked to light
 // (the 16 green Lego LEDs, 4 aligned ones, the amber arcs of the ring, or the row and the ring in turn). `&blink` makes the 16 LEDs blink as the robot's script
 // does; `&extra` adds steady lights of other colours (a blue one, a red glow, a ring of amber ones), as on the real
 // robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles; `&sway=40` swings it 40 px
@@ -63,7 +63,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12, dist = 380, rowGain = 1 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -98,7 +98,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     const t = (performance.now() - t0) / 1000;
     view.elev = elev != null ? elev : 55 + 35 * Math.sin((2 * Math.PI * t) / 40);       // 20 .. 90°
     const azim = 90 + 70 * Math.sin((2 * Math.PI * t) / 53);                             // from the nose side, and round towards both sides
-    const cam = cameraAt(Math.min(view.elev, 89.9), azim, 380);
+    const cam = cameraAt(Math.min(view.elev, 89.9), azim, dist);
 
     g.fillStyle = '#10141c';
     g.fillRect(0, 0, DEMO_W, DEMO_H);
@@ -126,7 +126,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     const gp = group(), cc = ringSet(), alt = isAlternating(gp, cc);
     const legoLit = gp !== -2 && (!blink || on), ringLit = cc >= 0 && (!blink || (alt ? !on : on));
     const driven = new Set(groupMembers(gp).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
-    if (legoLit) for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
+    if (legoLit) { g.save(); g.globalAlpha = rowGain; for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']); g.restore(); }
     if (ringLit) {
       g.save();
       g.globalAlpha = ringGain;                 // 1: bright arcs; 0.3: faint ones (to try the look in the window with a lower threshold)

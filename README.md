@@ -212,6 +212,39 @@ refaite ; la reprise par `locate` l'assure dans la page. Dans le volet (`?demo&b
 éteint (`&arcdim=3&dimgain=0.1`) : 1 acquisition, 0 perte, 7 réponses sur 8. Ce qui reste : la prédiction par le **gyroscope du téléphone** (pour suivre les mouvements
 rapides pendant que la rangée est allumée), l'IMU du robot, la pose (inclinaison et distance) tirée de H avec une focale approchée.
 
+**Dixième étape** (2026-11-07, après le **neuvième essai sur le téléphone**, version fcba687 : le suivi, essayé pour la première fois). Rapport (≈ 220 s, 2653 images, réglages
+par défaut, 70 cm environ : 0,64 px/mm, deux LED d'un groupe à 10 px) : carte « suivie » 91 %, mais **28 acquisitions et 25 pertes** ; rangée trouvée 88 %, arcs 79 %,
+les deux 71 % (huitième essai : 73 %) ; images avec les 8 points : 54 / 40 / 41 % à 75–90° / 60–75° / 45–60° (huitième essai : 73 / 59 / 49 %). Dans certaines tranches de
+10 s la carte est « suivie » à 95–97 % alors que les arcs ne répondent que dans 36–38 % des images (alors que l'ancienne détection les voit dans 100 %). Mouvement du téléphone
+mesuré au gyroscope : de 2 à 16 °/s en moyenne par tranche, soit (avec 9 à 10 px par degré à 640 px, pour un champ de 65–70°) **20 à 160 px/s : de l'ordre d'un écart entre deux
+LED par image** (10 px) à 12 images par seconde.
+*Reproduit* sans téléphone : le volet dans Chrome sans écran (`Emulation.setCPUThrottlingRate` 5×, 16 images/s), scène simulée à 70 cm (`?demo&blink&extra&elev=60&sway=80&dist=700&rowgain=0.5`,
+les deux paramètres `dist` et `rowgain` sont nouveaux) : **17 acquisitions, 16 pertes, 81 % suivies en 45 s** ; la même scène à 38 cm ou sans mouvement : 1 ou 2 acquisitions. Les causes
+trouvées (pas de modèle de mouvement, mes essais précédents étaient à 30–38 cm avec une main lente) :
+1. **Aucune prédiction du mouvement.** La carte n'était corrigée qu'une image sur deux et les places cherchées dans un rayon de 7 px ; une main à 100 px/s déplace l'image de 7 à 15 px
+   entre deux corrections : la première correction manquée entraînait la perte (8 images sans correction). Le rayon « en mm × échelle » avait été réglé à courte distance.
+2. **Carte « zombie ».** Les décalages de la rangée gardaient la carte en vie sans que l'anneau réponde (rien ne disait comment elle est tournée ou à quelle distance).
+3. **Un ajustement faux gardé pour toujours** : la correction de la carte ajustait aussi des réponses fraîches de la rangée (une tache parasite près d'une LED éteinte), et 4 points
+   s'ajustent toujours exactement ; avec 3 arcs seule une correction affine était faite, qui ne répare pas la forme de la carte.
+4. **Acquisition à partir de taches périmées** : les taches trouvées pour le jeu éteint viennent de la carte N (0,1 à 0,3 s) : à 100 px/s, 10 à 30 px d'écart.
+Ce qui a été fait (`src/tracker.js` ; `TUNE` : β = 0,7, portée = 0,8 × vitesse × temps) : (a) la carte garde une **vitesse** (px/s, filtre alpha-bêta) et se déplace de vitesse × dt
+avant chaque image ; (b) **recalage par motif** (`slide`) : le motif des places du jeu allumé (4 LED, ou 4 arcs) glisse sur sa carte P fraîche et on prend le décalage où le plus de
+places répondent, plutôt que « la tache la plus proche de chaque place » (les 4 LED sont identiques et à 10 px : la plus proche est souvent la voisine) ; (c) **acquisition par l'anneau
+seul, vu dans cette image** (les quatre coins doivent avoir une réponse fraîche dans P) : la carte est « en attente », seuls les 4 arcs sont demandés, et la rangée, quand elle est allumée,
+dit lequel des quatre quarts de tour et lequel des deux sens (`mirror`) est le bon ; (d) l'ajustement de la carte ne se fait que sur les arcs frais (4 : homographie ; 3 : affine) ; (e) une
+carte qui n'a eu que 3 arcs pendant 1 s repart d'un carré complet frais ; sans correction de l'anneau pendant 2 s, elle est perdue ; (f) un changement de taille d'analyse **garde la carte**
+(mise à l'échelle) ; (g) un point est « **confirmé** » s'il a répondu frais dans les 0,45 dernières secondes (les jeux clignotent à tour de rôle : l'un répond maintenant, l'autre a répondu
+il y a un instant ; la carte N le garde en traînée, trop floue pour compter) : « 8 sur 8 » veut dire cela, et la page dessine en trait plein les points confirmés. Le rapport donne en plus
+les pertes par cause (inertie, anneau, attente de la rangée, taille), les reprises depuis l'anneau, la vitesse de la carte, et les 40 dernières images du suivi (état, rangée, arcs).
+*Mesuré* : (i) scène synthétique à l'échelle du téléphone (70 cm, 16 images/s, taches de l'ancien jeu, traînées dans N) : de 40 à 160 px de balancement (pointes de 75 à 300 px/s) :
+1 acquisition, 0 perte, places à moins de 6 px dans 97 % des images (balancement 80) ; avant : 17 acquisitions, 16 pertes ; (ii) **la vraie page dans Chrome sans écran**, 70 cm, 16 images/s :
+balancement 80 et 120 (pointes d'environ 150 et 230 px/s) : **1 acquisition, 0 perte, 100 % suivies, les deux jeux dans 99 % des images** (avant : 81 %) ; à 38 cm : 100 % ; changement de
+taille 640 → 480 → 640 : carte gardée ; trois arcs dont un presque éteint : 7 points sur 8, 1 acquisition. 151 tests JS et 21 tests Python passent.
+*Limites, à ne pas oublier* : tout cela est en simulation (pas de bruit de capteur, pas d'exposition automatique, des cartes N dessinées d'après un modèle de traînée) ; **pas encore essayé
+sur le téléphone** ; un début de carte demande une image où l'anneau est allumé et frais ; le sens de la rangée (`mirror`) est choisi par le plus petit décalage (les deux sens diffèrent de
+8 mm, soit 5 px à 70 cm : fragile) ; l'arc caché dérive jusqu'à 10 px pendant que seule la rangée corrige ; au-delà de 300 px/s la carte se perd. Reste : le **gyroscope du téléphone** comme
+vitesse a priori, l'IMU du robot, la pose tirée de H.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les

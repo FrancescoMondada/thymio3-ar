@@ -28,7 +28,7 @@ const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
 const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
 const tracker = new Tracker();                                       // the map of the robot's plane to the picture, tracked (tracker.js)
-const trackLog = { acquisitions: 0, losses: 0, state: 'idle', rotation: null, recent: [] };       // recent: what the last pictures did (for the console: window.thymioAR)
+const trackLog = { acquisitions: 0, losses: 0, refreshes: 0, lostBy: {}, state: 'idle', rotation: null, recent: [] };       // recent: what the last pictures did (for the console: window.thymioAR)
 window.thymioAR = { tracker, trackLog, get state() { return state; } };
 const SEEN_PEAK = 25;                                                 // a response (0..255) under this in both sets: nothing blinks in the picture (the phone points away from the robot)
 const timeline = new Timeline();                                     // what happened over the whole test, in slices of 10 s (for the report)
@@ -61,12 +61,12 @@ const win = {
   last: { spots: [], brightest: 0, lit: 0 },
   diag: null,
 };
-function resetWindows() {
+function resetWindows({ keepMap = false } = {}) {
   win.counts = new Rolling(60); win.weights = new Rolling(60);
   win.read = new Rolling(30); win.find = new Rolling(30); win.latency = new Rolling(30);
   win.rateOut = new Rate(30); win.frames = [];
   win.cache = null;                               // the last result of the blink detection (the sums are not done on every picture)
-  tracker.reset();                                // the map is in pixels of the picture analysed: a new size, a new map
+  if (!keepMap) tracker.reset();                  // (a new size keeps the map, rescaled: see tick)
   // what each set does, over the last 60 pictures: candidates found, whether it was picked, whether the other set's prediction saved it, the
   // strongest response, and the scale (px per mm) measured
   win.diag = { rowCand: new Rolling(60), rowOk: new Rolling(60), rowPeak: new Rolling(60), ringCand: new Rolling(60), ringOk: new Rolling(60), ringPeak: new Rolling(60), rescued: new Rolling(60), unseen: new Rolling(60), scale: new Rolling(60), mismatch: new Rolling(60) };
@@ -128,7 +128,12 @@ function tick(cam, now, meta) {
     // 640x360 the first measures were made on (the first test on a phone analysed 720x1280: 125 ms a picture, 6 a second)
     const scale = Math.min(1, state.procSize / Math.max(vw, vh));
     const W = Math.max(16, Math.round(vw * scale)), H = Math.max(16, Math.round(vh * scale));
-    if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; resetWindows(); }
+    if (canvas.width !== W || canvas.height !== H) {
+      const oldW = canvas.width, oldH = canvas.height;
+      canvas.width = W; canvas.height = H;
+      resetWindows({ keepMap: true });
+      if (oldW > 300 && oldH > 150 && (W !== oldW || H !== oldH) && Math.abs(W / H - oldW / oldH) < 0.02) tracker.rescale(W / oldW, H / oldH); else tracker.reset();       // (300 x 150: the default size of a canvas that has not been used yet)
+    }
     win.frameW = vw; win.frameH = vh;
 
     const a = performance.now();
@@ -172,14 +177,19 @@ function tick(cam, now, meta) {
         // found the first time, and again when it is lost
         if (trackOn()) {
           tr = tracker.update({
-            maps: { green: [pdiff.P, pdiff.N], amber: [pdiffAmber.P, pdiffAmber.N] }, w: W, h: H, group: state.group, circle: state.circle, motion: Number.isFinite(currentMotion()) ? currentMotion() : 0,
+            maps: { green: [pdiff.P, pdiff.N], amber: [pdiffAmber.P, pdiffAmber.N] }, w: W, h: H, group: state.group, circle: state.circle, motion: Number.isFinite(currentMotion()) ? currentMotion() : 0, t,
             found: { rings: ringsFor(loc.square), row: loc.aligned && loc.aligned.chosen.length >= 3 ? loc.aligned.chosen : null },
           });
           if (tr.state === 'acquire') trackLog.acquisitions++;
-          if (tr.state === 'lost' && trackLog.state !== 'lost' && trackLog.state !== 'idle') trackLog.losses++;
+          if (tr.refreshed) trackLog.refreshes++;
+          if (tr.state === 'lost' && trackLog.state !== 'lost' && trackLog.state !== 'idle') { trackLog.losses++; const why = tr.lostBy || 'taille'; trackLog.lostBy[why] = (trackLog.lostBy[why] || 0) + 1; }
           trackLog.state = tr.state; trackLog.rotation = tr.rotation; trackLog.last = tr;
-          trackLog.recent.push(`${tr.state[0]}${tr.rowMatched}${tr.ringMatched}${tr.points.filter((o) => o.rejected).length ? 'x' : ''}`);
+          trackLog.recent.push(`${tr.state[0]}${tr.pending ? 'p' : ''}${tr.rowConfirmed}${tr.ringConfirmed}${tr.points.filter((o) => o.rejected).length ? 'x' : ''}`);
           if (trackLog.recent.length > 80) trackLog.recent.shift();
+          (trackLog.detail ||= []).push({ s: tr.state[0], row: tr.rowMatched, ring: tr.ringMatched, ...(tr.diag || {}), sp: Math.round(tr.speed || 0), rs: tr.reseeded ? 1 : 0, lb: tr.lostBy, t: Math.round(now) });
+          if (trackLog.detail.length > 16) trackLog.detail.shift();
+          if (tr.state === 'lost' && trackLog.prevState !== 'lost') (trackLog.lossLog ||= []).push(trackLog.detail.slice());
+          trackLog.prevState = tr.state;
         } else if (state.detect === 'track') { tracker.reset(); trackLog.state = 'idle'; }
       }
     } else if (blink) {
@@ -209,7 +219,7 @@ function tick(cam, now, meta) {
     } else if (alignOn() && !res.waiting) { aligned = pickAligned(counted); counted = aligned.chosen; }
     // tracking: what counts is what answers at the places the map predicts (centres of the answers); the windows of locate() are not drawn
     if (tr && tr.tracking) {
-      counted = tr.points.filter((o) => o.matched && o.inlier !== false).map((o) => ({ x: o.blob.x, y: o.blob.y, area: o.blob.area, weight: o.v, set: o.set === 'row' ? 'line' : 'ring', color: 'clignotant' }));
+      counted = tr.points.filter((o) => o.confirmed).map((o) => { const here = o.matched && o.inlier !== false; return { x: here ? o.blob.x : o.px.x, y: here ? o.blob.y : o.px.y, area: here ? o.blob.area : 0, weight: o.v || 1, set: o.set === 'row' ? 'line' : 'ring', color: 'clignotant' }; });
       drawSpots(res.spots, counted, null, null, null, tr);
     } else drawSpots(res.spots, counted, aligned, square, loc?.window);
 
@@ -229,7 +239,7 @@ function tick(cam, now, meta) {
       sceneScale = Number.isFinite(sc0) ? sc0 : NaN;
       const d = win.diag, lineCand = res.spots.filter((sp) => sp.set === 'line').length, ringCand = res.spots.filter((sp) => sp.set === 'ring').length;
       const trk = tr && tr.tracking;                                   // tracking: found = 3 or more of the 4 answer at their places
-      const rowFound = trk ? tr.rowMatched >= 3 : alignOn() ? (aligned?.chosen.length ?? 0) >= 3 : lineCand >= 1, ringFound = trk ? tr.ringMatched >= 3 : !!square?.full;
+      const rowFound = trk ? tr.rowConfirmed >= 3 : alignOn() ? (aligned?.chosen.length ?? 0) >= 3 : lineCand >= 1, ringFound = trk ? tr.ringConfirmed >= 3 : !!square?.full;
       if (lineOn()) { d.rowCand.push(lineCand); d.rowOk.push(rowFound ? 1 : 0); d.rowPeak.push(peakLine); }
       if (squareOn()) { d.ringCand.push(ringCand); d.ringOk.push(ringFound ? 1 : 0); d.ringPeak.push(peakRing); }
       timeline.add(now, {
@@ -283,11 +293,11 @@ function drawSpots(spots, counted, aligned, square, window, tr = null) {
   ctx.lineWidth = 1.5 * k;
   if (tr) {                                                        // the 8 places the map predicts: solid where something answers, dashed where not
     for (const o of tr.points) {
-      const ok = o.matched && o.inlier !== false, r = Math.max(5 * k, (o.set === 'row' ? 3 : 5) * (tr.scale || 1) + 3 * k);
+      const ok = !!o.confirmed, here = o.matched && o.inlier !== false, r = Math.max(5 * k, (o.set === 'row' ? 3 : 5) * (tr.scale || 1) + 3 * k);
       ctx.setLineDash(ok ? [] : [3 * k, 3 * k]);
       ctx.strokeStyle = ok ? (o.set === 'ring' ? '#ffb454' : '#3ddc97') : 'rgba(255, 107, 107, 0.9)';
       ctx.beginPath();
-      ctx.arc(ok ? o.blob.x : o.px.x, ok ? o.blob.y : o.px.y, r, 0, 2 * Math.PI);
+      ctx.arc(here ? o.blob.x : o.px.x, here ? o.blob.y : o.px.y, r, 0, 2 * Math.PI);
       ctx.stroke();
     }
     ctx.setLineDash([]);
@@ -478,7 +488,8 @@ function report() {
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
     `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
-    `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.matched}/${win.last.tracker.expected} répondent (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched})${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s), ${trackLog.losses} perte(s) ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
+    `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.confirmed}/${win.last.tracker.expected} confirmés dans la dernière période, ${win.last.tracker.matched} répondent dans cette image (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched}), vitesse ${fmt(win.last.tracker.speed, 0)} px/s${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s) dont ${trackLog.refreshes} reprise(s) depuis l'anneau, ${trackLog.losses} perte(s) (${Object.entries(trackLog.lostBy).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucune'}) ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
+    ...(state.detect === 'track' ? [`dernières images du suivi (état a/t/c/l = acquis/suivi/inertie/perdu, p = attend la rangée, puis rangée et arcs confirmés, x = réponse écartée): ${trackLog.recent.slice(-40).join(' ')}`] : []),
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
     `diagnostic arcs: ${squareOn() && win.diag?.ringCand.count ? `carré trouvé dans ${fmt(100 * win.diag.ringOk.mean, 0)} % des images, ${fmt(win.diag.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(win.diag.ringPeak.mean, 0)}, seuil des arcs ${state.ringThreshold}, ${fmt(100 * win.diag.rescued.mean, 0)} % sauvées par la prédiction` : 'n/d'}`,
@@ -524,7 +535,7 @@ async function start(kind) {
     if (!state.demo) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
     const cam = state.demo
-      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), ringGain: params.has('ring') ? Number(params.get('ring')) : 1, dimArc: params.has('arcdim') ? Number(params.get('arcdim')) : -1, dimGain: params.has('dimgain') ? Number(params.get('dimgain')) : 0.12, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
+      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), dist: Number(params.get('dist') || 380), rowGain: params.has('rowgain') ? Number(params.get('rowgain')) : 1, ringGain: params.has('ring') ? Number(params.get('ring')) : 1, dimArc: params.has('arcdim') ? Number(params.get('arcdim')) : -1, dimGain: params.has('dimgain') ? Number(params.get('dimgain')) : 0.12, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     timeline.reset();

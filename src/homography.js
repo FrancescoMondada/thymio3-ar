@@ -23,7 +23,7 @@ export function invertH(H) {
   return inv.map((v) => v / inv[8]);
 }
 
-const multiply = (P, Q) => {
+export const compose = (P, Q) => {
   const out = new Array(9).fill(0);
   for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) for (let k = 0; k < 3; k++) out[r * 3 + c] += P[r * 3 + k] * Q[k * 3 + c];
   return out;
@@ -78,7 +78,7 @@ export function fitHomography(src, dst) {
   if (!h) return null;
   const Hn = [...h, 1];
   const Tdinv = invertH(nd.T);
-  const H = multiply(multiply(Tdinv, Hn), ns.T);
+  const H = compose(compose(Tdinv, Hn), ns.T);
   if (!H.every(Number.isFinite) || Math.abs(H[8]) < 1e-12) return null;
   return H.map((v) => v / H[8]);
 }
