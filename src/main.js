@@ -11,6 +11,8 @@ import { LockIn } from './lockin.js';
 import { PairDiff } from './pairdiff.js';
 import { pickAligned } from './aligned.js';
 import { pickSquare } from './square.js';
+import { locate } from './locate.js';
+import { ROW_GAP } from './layout.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
 
@@ -27,7 +29,7 @@ const lock = new LockIn({ hz: hzOf(HALF_MS), windowMs: windowOf(HALF_MS), comput
 
 // detect: 'diff' (what turns on or off between two pictures half a period apart: pairdiff.js), 'blink' (what blinks at the
 // robot's rhythm over a second: lockin.js, needs a phone that does not move) or 'bright' (the bright spots of each picture)
-const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: 480,
+const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, ringThreshold: Number(params.get('ringthr')) || 80, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: 480,
   halfMs: HALF_CHOICES.includes(Number(params.get('half'))) ? Number(params.get('half')) : HALF_MS,        // the LEDs blink this long on, this long off
   group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0,    // Lego LEDs: 0..3: 4 aligned on one row, 16 mm apart; -1: the 16; -2: none
   circle: CIRCLES.includes(Number(params.get('circle'))) && params.has('circle') ? Number(params.get('circle')) : 1 };    // ring arcs: 1: NE SE SW NW (a square, sides parallel to the row); 0: N E S W; -1: none. With a group they blink in turn
@@ -47,12 +49,16 @@ const win = {
   rateOut: new Rate(30), frames: [],            // [time, presentedFrames] of the last frames the camera gave
   latencyKind: 'n/d', frameW: 0, frameH: 0,
   last: { spots: [], brightest: 0, lit: 0 },
+  diag: null,
 };
 function resetWindows() {
   win.counts = new Rolling(60); win.weights = new Rolling(60);
   win.read = new Rolling(30); win.find = new Rolling(30); win.latency = new Rolling(30);
   win.rateOut = new Rate(30); win.frames = [];
   win.cache = null;                               // the last result of the blink detection (the sums are not done on every picture)
+  // what each set does, over the last 60 pictures: candidates found, whether it was picked, whether the other set's prediction saved it, the
+  // strongest response, and the scale (px per mm) measured
+  win.diag = { rowCand: new Rolling(60), rowOk: new Rolling(60), rowPeak: new Rolling(60), ringCand: new Rolling(60), ringOk: new Rolling(60), ringPeak: new Rolling(60), rescued: new Rolling(60), scale: new Rolling(60), mismatch: new Rolling(60) };
 }
 
 // ---- the angle of view -------------------------------------------------------------------------------
@@ -121,23 +127,37 @@ function tick(cam, now, meta) {
     // two ways to find the LEDs: the ones that BLINK at the robot's rhythm (lockin.js: steady lights of any kind are
     // ignored), or the bright spots in each picture (detect.js)
     const blink = state.detect !== 'bright';                       // looking for LEDs that blink: by difference or by lock-in
+    const longSide = Math.max(W, H);
+    // sizes in pixels follow the picture, not constants: the robot is 6 px or 60 px across, depending on the distance and the zoom
+    // (once one set gives the scale, locate() takes its minimum sizes from it)
     const size = { minArea: 2, maxArea: Math.max(50, (W * H) / 150) };
-    let res;
+    const arcSize = { minArea: 4, maxArea: Math.max(80, (W * H) / 20), minFill: 0.1, maxAspect: 8 };
+    let res, loc = null, peakLine = 0, peakRing = 0;
+    const tag = (spots, set) => { for (const sp of spots) sp.set = set; return spots; };
     if (state.detect === 'diff') {
-      // two sets can blink: the Lego LEDs (green) and the ring arcs (amber, long thin blobs: looser shape limits)
+      // two sets can blink: the Lego LEDs (green) and the ring arcs (amber: their own threshold, looser shape limits)
       const t = meta.captureTime != null ? meta.captureTime : now;
-      const arcSize = { minArea: 4, maxArea: Math.max(80, (W * H) / 20), minFill: 0.1, maxAspect: 8 };
       let waiting = false, brightest = 0;
       const spots = [];
       if (lineOn()) {
-        if (pdiff.push(img.data, W, H, t)) { const r = pdiff.find(state.blinkThreshold, size); for (const sp of r.spots) sp.set = 'line'; spots.push(...r.spots); brightest = Math.max(brightest, r.brightest); }
+        if (pdiff.push(img.data, W, H, t)) { const r = pdiff.find(state.blinkThreshold, size); spots.push(...tag(r.spots, 'line')); peakLine = r.brightest; brightest = Math.max(brightest, r.brightest); }
         else waiting = true;
       }
       if (squareOn()) {
-        if (pdiffAmber.push(img.data, W, H, t)) { const r = pdiffAmber.find(state.blinkThreshold, arcSize); for (const sp of r.spots) sp.set = 'ring'; spots.push(...r.spots); brightest = Math.max(brightest, r.brightest); }
+        if (pdiffAmber.push(img.data, W, H, t)) { const r = pdiffAmber.find(state.ringThreshold, arcSize); spots.push(...tag(r.spots, 'ring')); peakRing = r.brightest; brightest = Math.max(brightest, r.brightest); }
         else waiting = true;
       }
       res = waiting ? { spots: [], brightest: 0, lit: 0, waiting: true } : { spots, brightest, lit: 0 };
+      if (!waiting) {
+        // each set says where the other must be (layout.js), at the scale measured in this picture; where it must be, a missing set is
+        // looked for again with a lower threshold
+        loc = locate({
+          line: spots.filter((sp) => sp.set === 'line'), ring: spots.filter((sp) => sp.set === 'ring'), group: state.group, wantLine: lineOn(), wantRing: squareOn(),
+          elevDeg: currentAngle(), longSide,
+          retryRing: squareOn() ? (w) => tag(pdiffAmber.find(Math.max(25, Math.round(state.ringThreshold * 0.45)), arcSize, w).spots, 'ring') : null,
+          retryLine: lineOn() ? (w) => tag(pdiff.find(Math.max(20, Math.round(state.blinkThreshold * 0.6)), size, w).spots, 'line') : null,
+        });
+      }
     } else if (blink) {
       if (lock.push(img.data, W, H, meta.captureTime != null ? meta.captureTime : now)) {
         win.cache = finder.findFromValues(state.signal === 'color' ? lock.chroma : lock.amp, W, H, state.blinkThreshold, size);
@@ -156,18 +176,14 @@ function tick(cam, now, meta) {
     // LEDs are other colours and also bright); a blinking spot has no colour: they all count
     let counted = blink || state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
     // 4 LEDs of a row blink: of everything the detector finds, only 3 or 4 spots on a straight line at even gaps are the LEDs;
-    // 4 arcs of the ring blink: only 4 spots that are the corners of a convex quadrilateral (a square seen in perspective), the
-    // ones whose opposite sides point where the row points being preferred (they should be parallel to it)
-    const lineSpots = counted.filter((sp) => sp.set !== 'ring'), ringSpots = counted.filter((sp) => sp.set === 'ring');
-    let aligned = null, square = null, chosenLine = lineSpots, chosenRing = ringSpots;
-    if (alignOn() && !res.waiting) { aligned = pickAligned(lineSpots); chosenLine = aligned.chosen; }
-    if (squareOn() && !res.waiting) {
-      const rowLine = aligned && aligned.chosen.length >= 3 ? { p: aligned.chosen[0], q: aligned.chosen[aligned.chosen.length - 1] } : null;
-      square = pickSquare(ringSpots, { rowLine });
-      chosenRing = square.chosen;
-    }
-    counted = [...chosenLine, ...chosenRing];
-    drawSpots(res.spots, counted, aligned, square);
+    // 4 arcs of the ring blink: only 4 spots that are the corners of a convex quadrilateral (a square seen in perspective); each
+    // set helps the other (locate.js)
+    let aligned = null, square = null;
+    if (loc) {
+      aligned = loc.aligned; square = loc.square;
+      counted = [...(aligned ? aligned.chosen : counted.filter((sp) => sp.set !== 'ring')), ...(square ? square.chosen : [])];
+    } else if (alignOn() && !res.waiting) { aligned = pickAligned(counted); counted = aligned.chosen; }
+    drawSpots(res.spots, counted, aligned, square, loc?.window);
 
     win.read.push(b - a);
     win.find.push(c - b);
@@ -179,7 +195,16 @@ function tick(cam, now, meta) {
       const mc = motionClass(currentMotion());
       if (mc >= 0) { motionStats[mc].frames++; if (counted.length === expected()) motionStats[mc].full++; }
     }
-    win.last = { ...res, spots: counted, found: res.spots, aligned, square };
+    if (loc) {
+      const d = win.diag, lineCand = res.spots.filter((sp) => sp.set === 'line').length, ringCand = res.spots.filter((sp) => sp.set === 'ring').length;
+      if (lineOn()) { d.rowCand.push(lineCand); d.rowOk.push(alignOn() ? (aligned?.chosen.length >= 3 ? 1 : 0) : lineCand >= 1 ? 1 : 0); d.rowPeak.push(peakLine); }
+      if (squareOn()) { d.ringCand.push(ringCand); d.ringOk.push(square?.full ? 1 : 0); d.ringPeak.push(peakRing); }
+      d.rescued.push(loc.rescued ? 1 : 0);
+      d.mismatch.push(loc.mismatch ? 1 : 0);
+      const sc = loc.scales?.row ?? loc.scales?.ringMean;
+      if (Number.isFinite(sc)) d.scale.push(sc);
+    }
+    win.last = { ...res, spots: counted, found: res.spots, aligned, square, loc };
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
       if (win.frames.length > 30) win.frames.shift();
@@ -191,9 +216,18 @@ function tick(cam, now, meta) {
 }
 
 // green circle: counted; grey circle: a spot of another colour, not counted
-function drawSpots(spots, counted, aligned, square) {
+function drawSpots(spots, counted, aligned, square, window) {
   const k = canvas.width / Math.max(1, canvas.clientWidth);        // canvas pixels per screen pixel
   ctx.lineWidth = 1.5 * k;
+  if (window) {                                                    // where the other set said this one must be (dashed)
+    ctx.setLineDash([5 * k, 5 * k]);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.beginPath();
+    window.outline.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   const keep = new Set(counted);
   for (const s of spots) {
     const r = Math.max(6 * k, Math.sqrt(s.area / Math.PI) * 1.5 + 3 * k);
@@ -257,6 +291,14 @@ function refreshPanel() {
   }
   const vp = win.last.square?.vanishing;
   $('parallel').textContent = !squareOn() ? '' : vp ? `Parallélisme carré / rangée : écart ${fmt(vp.residual, 3)} (${vp.residual < 0.05 ? 'les côtés sont parallèles à la rangée' : 'pas parallèles : essayez l\'autre jeu d\'arcs'}).` : win.last.square?.full ? 'Parallélisme : il faut au moins 3 LED de la rangée.' : '';
+  const dg = win.diag, pct = (r) => fmt(100 * r.mean, 0, ' %');
+  const scaleNow = dg && dg.scale.count ? dg.scale.mean : NaN;
+  $('diag').textContent = !state.cam || !dg || !dg.rescued.count ? '' : [
+    alignOn() && dg.rowOk.count ? `Rangée : 3 ou 4 LED alignées dans ${pct(dg.rowOk)} des images (${fmt(dg.rowCand.mean, 1)} candidats, réponse max ${fmt(dg.rowPeak.mean, 0)}).` : '',
+    squareOn() && dg.ringOk.count ? `Arcs : carré trouvé dans ${pct(dg.ringOk)} des images (${fmt(dg.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(dg.ringPeak.mean, 0)}${dg.rescued.mean > 0.005 ? `, ${pct(dg.rescued)} des images sauvées par la prédiction de l'autre jeu` : ''}).` : '',
+    Number.isFinite(scaleNow) ? `Échelle : ${fmt(scaleNow, 2)} px/mm, deux LED d'un groupe à ${fmt(ROW_GAP * scaleNow, 0)} px${ROW_GAP * scaleNow < 8 ? ' : très petit, rapprochez-vous ou prenez 640 px' : ROW_GAP * scaleNow > 120 ? ' : très grand, éloignez-vous ou prenez 320 px' : ''}.` : '',
+    dg.mismatch.mean > 0.2 ? 'Les échelles de la rangée et du carré ne s\'accordent pas : l\'un des deux n\'est pas ce qu\'on croit.' : '',
+  ].filter(Boolean).join(' ');
   $('detectNote').textContent = blink && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : cette détection ne verra rien (choisissez « LED clignotantes »).'
     : state.detect === 'bright' && robot.on && robot.mode === 'blink' ? 'Les LED clignotent : la détection par luminosité ne les voit qu\'une image sur deux (choisissez « allumées en continu »).'
     : state.detect === 'diff' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection compare deux images : le téléphone peut bouger.'
@@ -324,6 +366,9 @@ function report() {
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
     `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
+    `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
+    `diagnostic arcs: ${squareOn() && win.diag?.ringCand.count ? `carré trouvé dans ${fmt(100 * win.diag.ringOk.mean, 0)} % des images, ${fmt(win.diag.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(win.diag.ringPeak.mean, 0)}, seuil des arcs ${state.ringThreshold}, ${fmt(100 * win.diag.rescued.mean, 0)} % sauvées par la prédiction` : 'n/d'}`,
+    `échelle: ${win.diag?.scale.count ? `${fmt(win.diag.scale.mean, 2)} px/mm (LED d'un groupe à ${fmt(ROW_GAP * win.diag.scale.mean, 0)} px)` : 'n/d'}${win.last.loc?.scales?.row && win.last.loc?.scales?.ringMean ? `; rangée ${fmt(win.last.loc.scales.row, 2)}, carré ${fmt(win.last.loc.scales.ringMean, 2)}, rapport ${fmt(win.last.loc.scales.ratio, 2)}${win.last.loc.mismatch ? ' (INCOHÉRENT)' : ''}` : ''}; prédiction ${win.last.loc?.predicted ?? 'aucune'}${win.last.loc?.rescued ? ` (${win.last.loc.rescued})` : ''}`,
     `images reçues/s: ${fmt(cameraFps(), 1)}  analysées/s: ${fmt(win.rateOut.perSecond, 1)}  par période de clignotement: ${fmt((win.rateOut.perSecond * 2 * state.halfMs) / 1000, 1)}`,
     `retard caméra→page: ${latency.count ? `${fmt(latency.mean, 0)} ms (${win.latencyKind})` : 'n/d'}`,
     `lecture de l'image: moy ${fmt(read.mean, 1)} max ${fmt(read.max, 1)} ms`,
@@ -364,7 +409,7 @@ async function start(kind) {
     if (!state.demo) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
     const cam = state.demo
-      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
+      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), ringGain: params.has('ring') ? Number(params.get('ring')) : 1, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     resetWindows();
@@ -514,6 +559,7 @@ $('blinkSpeed').onchange = (e) => { state.halfMs = Number(e.target.value); apply
 $('detect').onchange = (e) => { setDetect(e.target.value); };
 $('signal').onchange = (e) => { state.signal = e.target.value; resetWindows(); resetAngles(); };
 $('blinkThreshold').oninput = (e) => { state.blinkThreshold = +e.target.value; $('blinkThresholdValue').textContent = String(state.blinkThreshold); resetWindows(); resetAngles(); };
+$('ringThreshold').oninput = (e) => { state.ringThreshold = +e.target.value; $('ringThresholdValue').textContent = String(state.ringThreshold); resetWindows(); resetAngles(); };
 $('threshold').oninput = (e) => { state.threshold = +e.target.value; $('thresholdValue').textContent = String(state.threshold); resetWindows(); resetAngles(); };
 $('contrast').oninput = (e) => { state.contrast = +e.target.value; $('contrastValue').textContent = String(state.contrast); resetWindows(); resetAngles(); };
 $('colorFilter').onchange = (e) => { state.color = e.target.value; resetWindows(); resetAngles(); };
@@ -542,6 +588,8 @@ function setDetect(mode) {
   resetAngles();
   for (const el of document.querySelectorAll('[data-for]')) el.style.display = el.dataset.for.split(' ').includes(mode) ? '' : 'none';
 }
+$('ringThreshold').value = String(state.ringThreshold);
+$('ringThresholdValue').textContent = String(state.ringThreshold);
 $('ledGroup').value = String(state.group);
 $('circleSet').value = String(state.circle);
 $('blinkSpeed').value = String(state.halfMs);

@@ -74,6 +74,7 @@
           <div class="big" id="count">–</div>
           <div class="note" id="countNote">–</div>
           <div class="note" id="parallel"></div>
+          <div class="note" id="diag"></div>
         </section>
         <section>
           <h2>Vu de côté ?</h2>
@@ -125,6 +126,10 @@
             </div>
             <label for="blinkThreshold" style="min-height:0">Seuil : <b id="blinkThresholdValue">50</b> <span class="dim">(réponse max vue : <span id="ampMax">–</span>)</span></label>
             <input id="blinkThreshold" type="range" min="15" max="150" value="50" />
+            <div data-for="diff">
+              <label for="ringThreshold" style="min-height:0">Seuil des arcs : <b id="ringThresholdValue">80</b> <span class="dim">(le bois orange donne jusqu'à 50 quand l'image bouge)</span></label>
+              <input id="ringThreshold" type="range" min="30" max="200" value="80" />
+            </div>
             <p class="note" data-for="diff" style="margin:0 0 4px">Un point compte si son vert monte ou descend entre deux images d'âges voisins d'une demi-période : le corps, la table et les lumières fixes ne changent pas. Marche quand le téléphone bouge.</p>
             <p class="note" data-for="blink" style="margin:0 0 4px">Un point compte s'il s'allume et s'éteint au rythme du robot sur une fenêtre de 2,5 périodes, sans bouger d'un pixel : il faut poser le téléphone.</p>
           </div>

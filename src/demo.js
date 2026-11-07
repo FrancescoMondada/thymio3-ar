@@ -63,7 +63,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -128,6 +128,8 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     const driven = new Set(groupMembers(gp).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
     if (legoLit) for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
     if (ringLit) {
+      g.save();
+      g.globalAlpha = ringGain;                 // 1: bright arcs; 0.3: faint ones (to try the look in the window with a lower threshold)
       g.lineCap = 'round';
       for (const m of circleMembers(cc)) {
         const pts = [];
@@ -140,6 +142,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
           g.stroke();
         }
       }
+      g.restore();
     }
     if (extra) {
       // steady lights that are not the ones asked for: a blue one at the front, a red glow low at each side of the back, an

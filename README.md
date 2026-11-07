@@ -39,13 +39,28 @@ d'environ 45° (le firmware les nomme N, NE, E, SE, S, SW, W, NW). Le robot peut
 carré dont les côtés sont parallèles aux axes du robot, donc deux d'entre eux à la rangée de LED vertes si le nord pointe vers
 le nez) ou **N E S W** (un carré tourné de 45°). Avec des LED vertes ET des arcs, ils clignotent **à tour de rôle** (la rangée est
 allumée quand le cercle est éteint, et inversement) ; la couleur dit lequel est lequel : vert pour la rangée, ambre pour les
-arcs (`PairDiff` avec la mesure *ambre* `R ≥ G ? max(0, G − B) : 0` : sur la photo où 6 des 8 arcs sont allumés, elle trouve
+arcs (`PairDiff` avec la mesure *ambre* `R ≥ 0,75 G ? min(R, G) − B : 0`, tolérante : dans l'image du téléphone les arcs sont **jaune saturé**, (255,255,24), R et G égaux au bruit près, et la première mesure `R ≥ G ? G − B : 0` perdait un pixel sur deux selon le bruit : sur la photo où 6 des 8 arcs sont allumés, elle trouve
 exactement ces 6, et ni le bois de la table, ni les lueurs du corps, ni la lueur rouge, ni les LED vertes).
 Filtre de forme : de tous les points ambre, la page garde 4 points qui font un quadrilatère convexe pas trop plat (côtés
-opposés et diagonales dans des rapports plausibles pour un carré vu en perspective). **Parallélisme** : le point de fuite de
+opposés à moins de 2 fois l'un de l'autre, diagonales qui se coupent près de leur milieu : entre 30 % et 70 %, **de même taille** : rapport des
+surfaces ≤ 4, car ce sont 4 fois le même arc). **Parallélisme** : le point de fuite de
 deux côtés opposés doit se trouver sur la droite de la rangée ; l'écart est mesuré et affiché (≈ 0,02 si les côtés sont
 parallèles à la rangée, 0,3 à 0,7 pour le carré tourné de 45°), pas imposé (option `preferParallel`, désactivée tant qu'on n'a pas
 vu sur le robot que le nord du cercle pointe vers le nez).
+
+**Prédiction croisée et échelle** (`src/layout.js`, `src/locate.js`). On sait où sont les LED sur le robot (plan, en mm : arcs à 26 mm
+autour de (0, 26), rangées de LED à y = −7 et −15, 16 mm entre deux LED d'un groupe) : sur la photo des arcs, 16 mm = 84 px et le carré
+des arcs donne la même échelle (5,3 px/mm), et le centre du cercle est à 33 mm de la rangée. Un jeu bien vu donne donc l'échelle et dit où
+l'autre doit être : la rangée dit où chercher les arcs, les arcs disent où chercher la rangée. Tout est exprimé en rapport à l'échelle mesurée dans
+l'image, donc **au même titre à tous les zooms** (testé de 1 à 5 px/mm) ; les tailles minimales viennent de l'échelle (un cinquième d'un côté du
+carré, un quart de l'écart entre LED) et, avant d'avoir une échelle, d'une fraction de l'image (1,2 % et 0,7 % de son grand côté), pas de pixels
+fixes. Trois usages : (1) si un jeu manque, on le cherche parmi les candidats **dans la fenêtre** prédite ; (2) s'il n'y en a pas, on regarde
+encore dans la fenêtre seule avec un **seuil plus bas** (45 % du seuil des arcs, 60 % de celui de la rangée), sans le bruit du reste de
+l'image ; (3) si les deux sont trouvés mais ne vont pas ensemble (le carré hors de la fenêtre de la rangée, ou l'inverse), on prend la meilleure paire
+cohérente ou on signale une incohérence. La fenêtre « arcs depuis la rangée » dépend de la hauteur de la caméra (le gyroscope du téléphone) :
+regardée dans l'axe de la rangée, l'échelle mesurée le long d'elle est réduite de sin(hauteur) alors que les distances en travers ne le sont
+pas ; elle couvre de 14 % (au-dessus de 70°) à 43 % (20–35°) d'une image portrait, celle « rangée depuis les arcs » 7 à 9 %. Elle est dessinée
+en pointillés quand elle sert. Les échelles de la rangée et du carré sont comparées (rapport entre 0,4 et 2,5), sinon incohérence signalée.
 
 **Filtre d'alignement** (`src/aligned.js`, quand 4 LED clignotent) : de tous les points trouvés, la page ne garde que 4
 (ou 3, signalé) **sur une droite, à intervalles réguliers** : les écarts le long de la droite ne varient que
@@ -99,6 +114,17 @@ Vu sur les photos de l'utilisateur (Samsung, vues de dessus et de côté vers 35
   ambre et les 4 LED du corps (magenta, cyan…) ;
 - un tenon éteint vaut environ (152,167,158), allumé (143,251,19) avec un cœur presque blanc.
 
+**Quatrième essai** (2026-11-07, version 11b4502 : rangée avant A + arcs NE SE SW NW en alternance, 2073 images, 90 s) : la rangée est
+trouvée comme avant, mais **les arcs rarement** : tous les points (8) dans 25 à 43 % des images à 45–90° et 72 % à 30–45° ; même téléphone
+immobile (< 5 °/s) seulement 37 % d'images complètes (781 images), 29 % en mouvement lent (1170), 20 % en rapide (122) : le mouvement n'est donc
+pas la cause principale. Photo des arcs fournie ensuite : les 4 arcs NE SE SW NW ressortent jaune saturé, blocs compacts de 28×30 px (300 à 430 px²,
+tous de la même taille) à la taille analysée (270×479), valeurs 230 sur la mesure ambre, tenant même à un seuil de 120 ; le bois y vaut ≤ 42. Une
+simulation de la scène de l'utilisateur (bois orange, arcs jaune saturé bruité, balancement) donne, au seuil unique de 50, **60 faux candidats par
+image** et 50 à 56 % de carrés trouvés, contre 81 à 89 % avec un seuil de 80 : d'où un seuil propre aux arcs (80 par défaut, réglable), la mesure
+ambre tolérante, la contrainte de même taille, et la prédiction croisée (idée de l'utilisateur, avec la taille qui varie avec le zoom).
+**Pas encore réessayé sur le téléphone.** Le rapport affiche maintenant, par jeu : candidats trouvés, part d'images où il est retenu, réponse
+maximale, part sauvée par la prédiction, échelle mesurée.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les
@@ -142,7 +168,7 @@ Mesuré sur des **vidéos synthétiques** (pas sur un robot) :
   toutes les 90 ms, toutes les images sont gardées).
 - scène simulée par luminosité (géométrie seule, 380 mm) : 16 points sur 16 jusqu'à 30°, dans 8 % des images à 20°, aucun à 10°.
 
-**Jamais essayé** : les arcs du cercle avec le téléphone et le robot (l'ordre et la direction des indices du cercle, le nord vers le nez, l'alternance avec la rangée) ; le mouvement mesuré par le gyroscope du téléphone ; les angles de 0 à 15° ; une tablette ; l'autre rangée et l'autre groupe ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
+**Jamais essayé** : la prédiction croisée et le seuil propre aux arcs sur le téléphone ; le parallélisme du carré et de la rangée (écart non lu : le carré était trop rarement trouvé) ; le mouvement mesuré par le gyroscope du téléphone ; les angles de 0 à 15° ; une tablette ; l'autre rangée et l'autre groupe ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
 appels sont ceux de `thymio3-cards/src/py/lights.py`, qui ont tourné sur un vrai robot) ; la régularité réelle du clignotement
 (`time.sleep_ms` en MicroPython) ; l'effet de l'exposition automatique et de l'obturateur à balayage sur des LED qui clignotent ;
 la détection par clignotement sur une vraie photo ou vidéo (il faut une paire éteintes/allumées, ou la page sur téléphone).

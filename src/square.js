@@ -16,6 +16,9 @@
 // angle between the row and the sides; for a finite one, about the distance from V to the row divided by the distance
 // from V to the origin (in SCALE units).
 //
+// The 4 blobs must also be about the same size (the same arc seen 4 times: at most `maxSizeRatio` between the largest and the
+// smallest), which refuses a quadrilateral made of one arc and three fragments of a halo.
+//
 // Cost: the strongest `maxCandidates` spots are tried, C(16, 4) = 1820 quadrilaterals.
 
 const SCALE = 500;
@@ -33,18 +36,23 @@ function residual(L, V) {
 
 // -> { chosen: [4 spots in order around the shape], full: true, sides, vanishing: { residual, pair } | null, centre } or
 //    { chosen: [], full: false }
-export function pickSquare(spots, { maxCandidates = 16, minSide = 6, maxOpposite = 2.5, maxDiagonal = 4.5, maxSideRatio = 5, minArea = 0.08, rowLine = null, preferParallel = false } = {}) {
+export function pickSquare(spots, { maxCandidates = 16, minSide = 6, maxOpposite = 2, maxDiagonal = 4.5, maxSideRatio = 5, minArea = 0.08, maxSizeRatio = 4, diagonalBand = 0.3, rowLine = null, preferParallel = false } = {}) {
   const cand = spots.slice().sort((a, b) => (b.weight ?? b.area ?? 1) - (a.weight ?? a.area ?? 1)).slice(0, maxCandidates);
   const m = cand.length;
   let best = null;
   for (let i = 0; i < m; i++) for (let j = i + 1; j < m; j++) for (let k = j + 1; k < m; k++) for (let l = k + 1; l < m; l++) {
-    const r = evaluate([cand[i], cand[j], cand[k], cand[l]], { minSide, maxOpposite, maxDiagonal, maxSideRatio, minArea, rowLine, preferParallel });
+    const r = evaluate([cand[i], cand[j], cand[k], cand[l]], { minSide, maxOpposite, maxDiagonal, maxSideRatio, minArea, maxSizeRatio, diagonalBand, rowLine, preferParallel });
     if (r && (!best || r.score > best.score)) best = r;
   }
   return best ? { ...best, full: true } : { chosen: [], full: false };
 }
 
-function evaluate(pts, { minSide, maxOpposite, maxDiagonal, maxSideRatio, minArea, rowLine, preferParallel }) {
+function evaluate(pts, { minSide, maxOpposite, maxDiagonal, maxSideRatio, minArea, maxSizeRatio, diagonalBand, rowLine, preferParallel }) {
+  // the 4 arcs are the same size in the picture, give or take the perspective (on the user's photo, areas 430, 415, 374, 365 px):
+  // a fragment next to a whole arc is not one of them
+  const areas = pts.map((p) => p.area ?? 1);
+  const sizeRatio = Math.max(...areas) / Math.max(1, Math.min(...areas));
+  if (sizeRatio > maxSizeRatio) return null;
   const cx = pts.reduce((s, p) => s + p.x, 0) / 4, cy = pts.reduce((s, p) => s + p.y, 0) / 4;
   const P = pts.slice().sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
   // convex: the turns all go the same way
@@ -75,10 +83,12 @@ function evaluate(pts, { minSide, maxOpposite, maxDiagonal, maxSideRatio, minAre
   if (Math.abs(den) < 1e-9) return null;
   const t = ((P[1].x - P[0].x) * sy - (P[1].y - P[0].y) * sx) / den;
   const u = ((P[1].x - P[0].x) * ry - (P[1].y - P[0].y) * rx) / den;
-  if (t < 0.15 || t > 0.85 || u < 0.15 || u > 0.85) return null;
+  // the image of the middle of a square is near the middle of each diagonal: exactly at it without perspective, and a camera 15 cm away at 20
+  // degrees moves it by about 0.1. Within 0.3 of the ends, then: a quadrilateral that includes a stray spot is rarely this regular
+  if (t < diagonalBand || t > 1 - diagonalBand || u < diagonalBand || u > 1 - diagonalBand) return null;
 
   const weight = pts.reduce((s, p) => s + (p.weight ?? p.area ?? 1), 0);
-  let score = weight * (1 - 0.3 * (((opp1 - 1) + (opp2 - 1)) / 2) / (maxOpposite - 1)) * (1 - 0.3 * (Math.abs(t - 0.5) + Math.abs(u - 0.5)));
+  let score = weight * (1 - 0.3 * (((opp1 - 1) + (opp2 - 1)) / 2) / (maxOpposite - 1)) * (1 - 0.3 * (Math.abs(t - 0.5) + Math.abs(u - 0.5))) * (1 - 0.3 * (sizeRatio - 1) / (maxSizeRatio - 1));
   let vanishing = null;
   if (rowLine) {
     const L = lineOf(rowLine.p, rowLine.q);

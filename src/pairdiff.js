@@ -29,9 +29,13 @@
 import { SpotFinder } from './detect.js';
 
 export class PairDiff {
-  // measure: 'green' (the 16 Lego LEDs: G - max(R, B)) or 'amber' (the ring arcs: G - B where R >= G, else 0)
-  constructor({ halfMs, lo = 0.4, hi = 1.6, cap = 24, measure = 'green' } = {}) {
+  // measure: 'green' (the 16 Lego LEDs: G - max(R, B)) or 'amber' (the ring arcs: min(R, G) - B where R >= 0.75 G, else 0);
+  // 'amber0' is the first amber measure (G - B where R >= G), kept for the tests that show why it was replaced.
+  // smooth: 1 blurs P and N with a 3 x 3 mean before the spots are looked for: the speckle of a compressed video (a saturated
+  // yellow arc, R = G = 255 give or take the noise) no longer breaks a big blob into pieces; for blobs of 10 px or more only.
+  constructor({ halfMs, lo = 0.4, hi = 1.6, cap = 24, measure = 'green', smooth = 0 } = {}) {
     this.measure = measure;
+    this.smooth = smooth;
     this.halfMs = halfMs;
     this.lo = lo;
     this.hi = hi;
@@ -49,6 +53,10 @@ export class PairDiff {
     this.source = null;                   // 'P' or 'N': which one the last find() used
     this.pf = new SpotFinder();
     this.nf = new SpotFinder();
+    this.pf2 = new SpotFinder();           // for the look inside a window: the others keep what the mask shows
+    this.nf2 = new SpotFinder();
+    this.Pm = null;
+    this.Nm = null;
     this.active = this.pf;
   }
 
@@ -59,6 +67,9 @@ export class PairDiff {
     this.ring = new Array(this.cap).fill(null);
     this.P = new Uint8Array(w * h);
     this.N = new Uint8Array(w * h);
+    this.tmp = new Uint16Array(w * h);
+    this.Pm = null;
+    this.Nm = null;
     this.reset();
   }
 
@@ -81,7 +92,15 @@ export class PairDiff {
     const n = w * h;
     const cur = this.ring[this.head] || (this.ring[this.head] = new Uint8Array(n));
     if (this.measure === 'amber') {
-      // amber arcs (255,190,20): 170; the green LEDs (R < G): 0; the wooden table (210,150,90): 60, but steady; white: 0
+      // the arcs of the ring in the phone's picture are SATURATED YELLOW, (255,255,24), (254,255,23), (253,248,17): R and G are
+      // equal give or take the noise, so the measure must not depend on which of them is larger. min(R, G) - B gives 230 for
+      // them; the green LEDs (143,251,19) or (54,255,36) have R well under G and are refused by R >= 0.75 G; white, grey: 0; the
+      // wooden table (110,90,65): 25, (200,150,100): 50, but steady
+      for (let i = 0, j = 0; i < n; i++, j += 4) {
+        const r = rgba[j], g = rgba[j + 1], a = r >= 0.75 * g ? (r < g ? r : g) - rgba[j + 2] : 0;
+        cur[i] = a > 0 ? a : 0;
+      }
+    } else if (this.measure === 'amber0') {
       for (let i = 0, j = 0; i < n; i++, j += 4) {
         const r = rgba[j], g = rgba[j + 1], a = r >= g ? g - rgba[j + 2] : 0;
         cur[i] = a > 0 ? a : 0;
@@ -110,6 +129,7 @@ export class PairDiff {
         if (d > 0) { if (d > P[k]) P[k] = d; } else if (-d > N[k]) N[k] = -d;
       }
     }
+    if (this.smooth && refs) { blur3(P, w, h, this.tmp); blur3(N, w, h, this.tmp); }
     this.head = (this.head + 1) % this.cap;
     if (this.count < this.cap) this.count++;
     this.refs = refs;
@@ -117,8 +137,11 @@ export class PairDiff {
     return this.ready;
   }
 
-  // The spots of the last picture (the SpotFinder result, plus `source`).
-  find(threshold, size) {
+  // The spots of the last picture (the SpotFinder result, plus `source`). With a `window` ({ bbox, inside(p) }: layout.js): only the
+  // part of the picture inside it, which is where the page expects this set to be because the OTHER set has been found: the threshold
+  // can then be lower than elsewhere (a faint arc next to a row that is seen well), without the noise of the rest of the picture.
+  find(threshold, size, window = null) {
+    if (window) return this.findIn(threshold, size, window);
     const rp = this.pf.findFromValues(this.P, this.w, this.h, threshold, size);
     const rn = this.nf.findFromValues(this.N, this.w, this.h, threshold, size);
     const useP = rp.spots.length >= rn.spots.length;
@@ -127,8 +150,46 @@ export class PairDiff {
     return { ...(useP ? rp : rn), source: this.source };
   }
 
+  findIn(threshold, size, window) {
+    const { w, h } = this, n = w * h;
+    if (!this.Pm) { this.Pm = new Uint8Array(n); this.Nm = new Uint8Array(n); }
+    const { Pm, Nm, P, N } = this;
+    Pm.fill(0);
+    Nm.fill(0);
+    const x0 = Math.max(0, Math.floor(window.bbox.x0)), x1 = Math.min(w - 1, Math.ceil(window.bbox.x1));
+    const y0 = Math.max(0, Math.floor(window.bbox.y0)), y1 = Math.min(h - 1, Math.ceil(window.bbox.y1));
+    const pt = { x: 0, y: 0 };
+    for (let y = y0; y <= y1; y++) {
+      pt.y = y;
+      for (let x = x0; x <= x1; x++) {
+        const i = y * w + x;
+        if (!P[i] && !N[i]) continue;
+        pt.x = x;
+        if (window.inside(pt)) { Pm[i] = P[i]; Nm[i] = N[i]; }
+      }
+    }
+    const rp = this.pf2.findFromValues(Pm, w, h, threshold, size);
+    const rn = this.nf2.findFromValues(Nm, w, h, threshold, size);
+    const useP = rp.spots.length >= rn.spots.length;
+    return { ...(useP ? rp : rn), source: useP ? 'P' : 'N', windowed: true };
+  }
+
   // Paints what the settings let through (the one that find() used) into a picture.
   paintMask(rgba) {
     this.active.paintMask(rgba);
+  }
+}
+
+// 3 x 3 mean, in place (the edges are left as they are): the pixels of a blob that the noise had made 0 take the value of
+// their neighbours, an isolated pixel of noise is divided by 9
+function blur3(a, w, h, tmp) {
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 1; x < w - 1; x++) tmp[row + x] = a[row + x - 1] + a[row + x] + a[row + x + 1];
+    tmp[row] = 3 * a[row]; tmp[row + w - 1] = 3 * a[row + w - 1];
+  }
+  for (let y = 1; y < h - 1; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) a[row + x] = (tmp[row - w + x] + tmp[row + x] + tmp[row + w + x]) / 9;
   }
 }
