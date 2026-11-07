@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Tracker, expectedPoints, slide } from '../src/tracker.js';
-import { applyH } from '../src/homography.js';
+import { applyH, compose } from '../src/homography.js';
 import { makeScene } from './evidence_scene.js';
 
 const T0 = 1000;
@@ -167,6 +167,41 @@ test('the same with a hand one and a half times as fast (peak about 250 px a sec
   assert.equal(acquisitions(out), 1, `${acquisitions(out)} acquisitions`);
   assert.ok(share(out, (o) => o.tracking) >= 0.97, `${pct(share(out, (o) => o.tracking))} tracked`);
   assert.ok(share(out, (o) => o.err < 8) >= 0.95, `within 8 px in ${pct(share(out, (o) => o.err < 8))}`);
+});
+
+test('a map whose shape went wrong (three arcs for a second) is replaced by a full fresh square of arcs, and keeps the way round it had: the row is not asked again', () => {
+  const scene = makeScene({ path: swayPath() }), tr = new Tracker();
+  const a = run(scene, { frames: 40, tracker: tr });
+  assert.equal(acquisitions(a.out), 1);
+  const t40 = a.out[39].t;
+  tr.H = compose(tr.H, [1, 0, 0, 0, 1, 0, 0.0009, 0, 1]);           // a perspective that is not there: what one wrong fit with three arcs leaves
+  tr.ringFullT = t40 - 1200;
+  const out = [];
+  for (let i = 0; i < 30; i++) {
+    const t = t40 + 40 * (i + 1), f = scene.frame(t);
+    const r = tr.update({ maps: f.maps, w: f.w, h: f.h, group: 0, circle: 1, found: scene.found(t), motion: 8, t });
+    out.push({ ...r, err: placeError(r, tr, f) });
+  }
+  assert.ok(out.some((o) => o.refreshed), 'replaced');
+  assert.ok(out.every((o) => !o.pending), 'not turned again: it keeps the way round it had');
+  assert.ok(out.slice(10).every((o) => o.err < 8), `the places are right again: ${Math.max(...out.slice(10).map((o) => o.err)).toFixed(1)} px`);
+});
+
+test('a row of which two LEDs are much dimmer than the other two (the 10th report: two of four confirmed) is still followed: one map, never lost, the ring all the time', () => {
+  const scene = makeScene({ w: 640, path: swayPath({ dist: 330 }), rowAmp: 90, ringAmp: 180, rowGains: [1, 0.3, 1, 0.3], shift: swayShift(50), trail: true });
+  const { out } = run(scene, { frames: 12 * 30, fps: 12, jitter: 30, stale: true, sets: true });
+  assert.equal(acquisitions(out), 1, `${acquisitions(out)} acquisitions`);
+  assert.ok(share(out, (o) => o.tracking) >= 0.99, `${pct(share(out, (o) => o.tracking))} tracked`);
+  assert.ok(share(out, (o) => o.ringConfirmed === 4) >= 0.97, 'the ring is confirmed');
+  assert.ok(share(out, (o) => o.rowConfirmed >= 2) >= 0.95, `at least the 2 bright LEDs of the row are confirmed: ${pct(share(out, (o) => o.rowConfirmed >= 2))}`);
+  assert.ok(share(out, (o) => o.err < 8) >= 0.95, `within 8 px in ${pct(share(out, (o) => o.err < 8))}`);
+});
+
+test('the tracker keeps statistics per place: how often it answers when its set is lit, and how far from where it was predicted', () => {
+  const { tr } = run(makeScene({ path: swayPath() }), { frames: 120 });
+  const ids = Object.keys(tr.stats);
+  assert.equal(ids.length, 8);
+  for (const id of ids) assert.ok(tr.stats[id].lit > 20 && tr.stats[id].hit / tr.stats[id].lit > 0.9, `${id}: ${tr.stats[id].hit}/${tr.stats[id].lit}`);
 });
 
 test('the speed of the map is learned from the pictures, and predicts where the places are: at 100 px a second the predicted places are within 3 px at every picture', () => {

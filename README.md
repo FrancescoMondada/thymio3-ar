@@ -245,6 +245,25 @@ sur le téléphone** ; un début de carte demande une image où l'anneau est all
 8 mm, soit 5 px à 70 cm : fragile) ; l'arc caché dérive jusqu'à 10 px pendant que seule la rangée corrige ; au-delà de 300 px/s la carte se perd. Reste : le **gyroscope du téléphone** comme
 vitesse a priori, l'IMU du robot, la pose tirée de H.
 
+**Onzième étape** (2026-11-07, après le **dixième essai**, version 8d8b506 : vitesse, recalage par motif, départ par l'anneau). Rapport (≈ 126 s, 1849 images, réglages par défaut, plus près :
+1,05–1,15 px/mm, deux LED d'un groupe à 17–21 px) : **l'anneau est suivi** (arcs trouvés 79–100 % selon les tranches, 4 confirmés sur 4 dans les dernières images), mais **la rangée
+n'est confirmée que par 2 LED sur 4** (rangée confirmée à 3 ou plus dans 37 % des images, « t24 » presque partout dans les dernières images, beaucoup d'« x » = réponses écartées),
+40 acquisitions dont 22 reprises depuis l'anneau, 16 pertes (15 par inertie, 1 par attente de la rangée), carte suivie 85 %, images avec les 8 points : 8 à 16 %. Rien ne répond avant
+10 s (réponse maximale 23–39 pour la rangée, 92 pour l'anneau : exposition qui s'installe ou téléphone pas encore pointé). La rangée est pourtant là : l'ancienne détection voit 4 points
+alignés (écarts 20/21 px) et la réponse maximale de la rangée va de 93 à 160 sur 255.
+*Hypothèses écartées par simulation* : un décalage du sens de la rangée (`mirror`, jusqu'à 8 mm = un demi-écart de groupe), une hauteur des LED de la rangée au-dessus du plan de l'anneau (8 mm,
+parallaxe) : le suivi les supporte à 1,5 px/mm (99 % complètes), la carte choisit le sens la plus proche. *Reproduit* : **deux LED de la rangée beaucoup plus faibles que les deux autres**
+(gains 1, 0,25, 1, 0,25) : 14 acquisitions, 13 pertes, rangée confirmée à 3 ou plus dans 6 % des images, c'est-à-dire les symptômes du rapport. Cause : le seuil d'une réponse (30 % de la force
+« usuelle » du jeu, apprise sur les LED qui répondent) laissait les deux LED faibles hors du jeu, et le recalage par motif comme la correction par décalage exigeaient 3 places sur 4.
+Ce qui a été fait : seuil d'une réponse = 20 % de la force usuelle (plancher 20 sur 255, `TAU_SHARE`) ; le recalage de la rangée et sa correction par décalage se contentent de **2 LED** (3 pour
+l'anneau) ; le sens de la rangée se décide aussi sur 2 LED ; une carte reprise d'un carré complet (reprise depuis l'anneau) **garde son quart de tour** au lieu d'attendre de nouveau la
+rangée. *Mesuré* (scène de 30 cm, 12 images/s, taches périmées, traînées) : deux LED à 25–30 % : **1 acquisition, 0 perte, 100 % suivies, anneau confirmé 100 %**, rangée confirmée à 3 ou
+plus 73 % (les LED à 22 sur 255 sont à la limite du plancher de 20 : la page ne peut pas les voir) ; LED à 30 % : 99 % ; la vraie page dans Chrome sans écran, 30 cm et 70 cm : 1 acquisition,
+0 perte, 99–100 % ; 154 tests JS et 21 tests Python passent.
+*Nouveau dans le rapport* (pour la prochaine fois) : une ligne par place (« places, quand leur jeu est allumé ») : part des images où la place répond frais, force moyenne de la plus forte
+réponse proche (répondu ou non), écart moyen des réponses aux places prédites en px, et la force usuelle de chaque jeu ; elle dira si deux LED sont faibles, si une place est décalée
+(sens de la rangée, hauteur), ou si c'est autre chose. *Pas encore essayé sur le téléphone.* Pas traité : les 10 premières secondes sans réponse.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les

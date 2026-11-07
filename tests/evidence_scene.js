@@ -23,23 +23,23 @@ function paint(map, w, h, cx, cy, sigma, amp) {
 // phase (the phone moved in between): both P and N answer for it, with about the same strength. The tracker must take P (fresh) whenever it answers.
 // shift(tMs) -> { x, y }: a translation of the whole picture (px of the 1280-wide frame), the way a phone swaying in the hand moves it (demo.js `sway`)
 // trail: the maps are drawn as PairDiff gives them: N is the union of the places a set had in the pictures aged 80 to 320 ms (a streak when it moves)
-export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, rowAmp = 150, ringAmp = 110, dropArcs = [], dropRow = [], distractors = 3, distractorAmp = 70, ghosts = true, seed = 1, shift = null, trail = false }) {
+export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, rowAmp = 150, ringAmp = 110, dropArcs = [], dropRow = [], distractors = 3, distractorAmp = 70, ghosts = true, seed = 1, shift = null, trail = false, rowZ = 0, rowGains = null, rowOffset = 0 }) {
   const h = Math.round((w * 720) / FRAME_W), k = w / FRAME_W, rnd = rng(seed);
   const rowSet = [0, 1, 2, 3].map((j) => (group % 2) + 2 * j), arcSet = [0, 1, 2, 3, 4, 5, 6, 7].filter((i) => i % 2 === circle);
   const camAt = (t) => { const p = path(t); return { cam: cameraAt(p.elev, p.azim, p.dist), dist: p.dist }; };
   let tNow = 0;
-  const toPx = (cam, X, Y) => { const q = project(cam, [X, Y, 0]), sh = shift ? shift(tNow) : { x: 0, y: 0 }; return { x: (q.x + sh.x) * k, y: (q.y + sh.y) * k }; };
-  const rowMm = (kk) => { const [X, Y] = legoPoint(rowName(group), kk); return [mirror < 0 ? -X : X, Y]; };
+  const toPx = (cam, X, Y, Z = 0) => { const q = project(cam, [X, Y, Z]), sh = shift ? shift(tNow) : { x: 0, y: 0 }; return { x: (q.x + sh.x) * k, y: (q.y + sh.y) * k }; };
+  const rowMm = (kk) => { const [X, Y] = legoPoint(rowName(group), kk); return [(mirror < 0 ? -X : X) + rowOffset, Y]; };
   const lit = (t) => ((t / 1000) * BLINK_HZ) % 1 < 0.5;                // true: the row is lit, the ring dark (they blink in turn)
   const points = (t) => {
     tNow = t;
     const { cam, dist } = camAt(t), ppm = (1000 / dist) * k;
-    return { ppm, row: rowSet.map((kk) => toPx(cam, ...rowMm(kk))), ring: arcSet.map((i) => toPx(cam, ...ring(i))), ringIds: arcSet };
+    return { ppm, row: rowSet.map((kk) => toPx(cam, ...rowMm(kk), rowZ)), ring: arcSet.map((i) => toPx(cam, ...ring(i))), ringIds: arcSet };
   };
   function frame(t) {
     const now = points(t), before = points(t - HALF_MS);
     const P = { green: new Uint8Array(w * h), amber: new Uint8Array(w * h) }, N = { green: new Uint8Array(w * h), amber: new Uint8Array(w * h) };
-    const drawRow = (map, pts, ppm) => pts.forEach((p, j) => { if (!dropRow.includes(j)) paint(map, w, h, p.x, p.y, Math.max(0.9, 2.2 * ppm), rowAmp); });
+    const drawRow = (map, pts, ppm) => pts.forEach((p, j) => { if (!dropRow.includes(j)) paint(map, w, h, p.x, p.y, Math.max(0.9, 2.2 * ppm), rowAmp * (rowGains ? rowGains[j] : 1)); });
     const drawRing = (map, pts, ppm, ids) => pts.forEach((p, j) => { if (!dropArcs.includes(ids[j])) paint(map, w, h, p.x, p.y, Math.max(1.2, 4 * ppm), ringAmp); });
     const same = points(t - 100);                                                    // an older picture of the same phase (100 ms earlier)
     if (trail) {

@@ -27,6 +27,7 @@ import { blobNear } from './evidence.js';
 import { ring, legoPoint, rowName, ROW_GAP } from './layout.js';
 
 export const FLOOR = 20;                        // a response under this is noise (0..255)
+export const TAU_SHARE = 0.2;                   // a place answers when its response is this share of the usual strength of its set (LEDs of a row differ a lot)
 export const TUNE = { beta: 0.7, reachK: 0.8 };   // beta: how much of what a picture says about the speed of the map is taken (alpha-beta filter); reachK: the share of speed x time the search reach carries
 export const OLD_AGE = 0.2;                     // s: the answers of the map N are 0.08 to 0.32 s old (pairdiff.js: references aged 0.4 to 1.6 half periods)
 export const REFRESH_MS = 1000;                 // the ring has not given a full fit (4 arcs) for this long: a full fresh square, if locate.js sees one, replaces the map
@@ -73,6 +74,7 @@ function shifted(H, dx, dy) {
 export class Tracker {
   constructor() {
     this.mirror = 0;                            // 0: not known yet, +1 / -1 once an acquisition has chosen
+    this.stats = {};                            // per place, over the whole session: see below (the report)
     this.reset();
   }
 
@@ -120,8 +122,21 @@ export class Tracker {
     } else if (found && !this.pending && t != null && this.ringFullT != null && t - this.ringFullT > REFRESH_MS) {
       // three arcs have corrected the map for a second (an affine correction cannot repair the shape of the map: one wrong fit once is kept for good): a
       // full square of fresh corners, if there is one, starts the map again, from the ring; the row says again which way round it is
-      const v = this.v;
-      if (this.acquireRing(found, { maps, w, h, circle, need: 4 })) { this.v = v; this.ringT = t; this.fixT = t; this.ringFullT = t; this.pending = { t0: t, n: 0 }; state = 'acquire'; acquired = true; this.refreshed = true; }
+      const v = this.v, old = this.H, rot0 = this.rotation, seen0 = this.seen;
+      if (this.acquireRing(found, { maps, w, h, circle, need: 4 })) {
+        this.rotation = rot0; this.seen = seen0; this.v = v; this.ringT = t; this.fixT = t; this.ringFullT = t; state = 'acquire'; acquired = true; this.refreshed = true;
+        if (rot0 !== null) {
+          // the quarter turn the map had is kept: the one for which the row falls where the old map put it (the others turn it by 58 mm or more)
+          const rowMm = expectedPoints({ group, circle: -1, mirror: this.mirror || 1 }), fresh = this.H;
+          let best = null;
+          for (let k = 0; k < 4; k++) {
+            const Hk = k ? compose(fresh, planeRotation(k)) : fresh;
+            const d = rowMm.reduce((a, p) => { const q = applyH(Hk, p.X, p.Y), r = applyH(old, p.X, p.Y); return a + Math.hypot(q.x - r.x, q.y - r.y); }, 0);
+            if (!best || d < best.d) best = { d, Hk };
+          }
+          this.H = best.Hk;
+        } else this.pending = { t0: t, n: 0 };
+      }
     }
     const before = this.H;
     const since = t != null && this.fixT != null ? Math.min(0.6, Math.max(dt, (t - this.fixT) / 1000)) : dt;       // s without a correction: the uncertainty of the places grows with it
@@ -172,7 +187,7 @@ export class Tracker {
       const A = affineCorrection(freshRing.map((o) => o.px), freshRing.map((o) => ({ x: o.blob.x, y: o.blob.y })));
       if (A) { this.H = corrected(this.H, A); updated = true; ringFixed = true; }
     }
-    if (!updated && fresh.length >= 3) {
+    if (!updated && fresh.length >= (snap && snap.set === 'row' ? 2 : 3)) {
       let dx = 0, dy = 0;
       for (const o of fresh) { dx += o.blob.x - o.px.x; dy += o.blob.y - o.px.y; }
       dx /= fresh.length; dy /= fresh.length;
@@ -202,6 +217,14 @@ export class Tracker {
       if (this.resolveRow({ maps, w, h, group, speed: Math.hypot(this.v.x, this.v.y), since })) { this.pending = null; this.seen = {}; }
       else if (t != null ? t - this.pending.t0 > PENDING_MS : this.pending.n > 50) { this.H = null; this.coast = 0; state = 'lost'; this.lostBy = 'pending'; this.pending = null; }
     }
+    // per place: how often it answers fresh when its set is lit (2 or more of its set answered fresh), the strongest response near it (answer or not), and where
+    // the answers are against the places that were predicted (px): a LED that is dim, a place that is systematically off (layout of the row, height of the LEDs)
+    for (const o of obs) {
+      const st = (this.stats[o.id] ||= { lit: 0, hit: 0, vall: 0, dx: 0, dy: 0 });
+      if (fresh.filter((q) => q.set === o.set).length < 2) continue;
+      st.lit++; st.vall += o.v;
+      if (o.matched && o.blob.map === 0 && o.inlier !== false) { st.hit++; st.dx += o.blob.x - o.px.x; st.dy += o.blob.y - o.px.y; }
+    }
     // confirmed places: the one that answered fresh in this picture, or within the last blink period (the set that is dark now answered 0.2 s ago, and
     // the map has been following the other since: its places are where the map says). Without a clock (tests) a place is confirmed when it answers now.
     for (const o of obs) {
@@ -229,10 +252,10 @@ export class Tracker {
       const places = pts.filter((p) => p.set === set).map((p) => ({ ...p, px: applyH(this.H, p.X, p.Y), s: scaleAt(this.H, p.X, p.Y) }));
       if (places.length < 3) continue;
       const s0 = places.reduce((a, p) => a + p.s, 0) / places.length, colour = places[0].colour;
-      const tau = Math.max(FLOOR, 0.3 * this.signal[colour]), cap = Math.max(2 * tau, 1.2 * this.signal[colour]);
+      const tau = Math.max(FLOOR, TAU_SHARE * this.signal[colour]), cap = Math.max(2 * tau, 1.2 * this.signal[colour]);
       const reach = Math.min(set === 'row' ? 1.4 * ROW_GAP * s0 : 33 * s0, ((set === 'row' ? 6 : 10) * s0 + 2) + TUNE.reachK * speed * since);
       const top = slide(maps[colour][0], w, h, places, { tau, cap, reach });
-      if (top && top.count >= 3 && (!best || top.score > best.score)) best = { set, ...top };
+      if (top && top.count >= (set === 'row' ? 2 : 3) && (!best || top.score > best.score)) best = { set, ...top };
     }
     return best;
   }
@@ -242,7 +265,7 @@ export class Tracker {
   // whose row falls on responses (3 of 4 at least) is the one, if no other quarter turn does as well (a place's worth less). Of the two layouts, the one
   // that needs the smaller shift. -> true when decided (the map is then turned and shifted)
   resolveRow({ maps, w, h, group, speed, since }) {
-    const P = maps.green[0], tau = Math.max(FLOOR, 0.3 * this.signal.green), cap = Math.max(2 * tau, 1.2 * this.signal.green);
+    const P = maps.green[0], tau = Math.max(FLOOR, TAU_SHARE * this.signal.green), cap = Math.max(2 * tau, 1.2 * this.signal.green);
     const opts = [];
     for (const mirror of this.mirror ? [this.mirror] : [1, -1]) for (let rot = 0; rot < 4; rot++) {
       const Hk = rot ? compose(this.H, planeRotation(rot)) : this.H;
@@ -250,7 +273,7 @@ export class Tracker {
       const s0 = places.reduce((a, p) => a + p.s, 0) / places.length;
       const reach = Math.min(1.4 * ROW_GAP * s0, 6 * s0 + 5 + TUNE.reachK * speed * since);
       const top = slide(P, w, h, places, { tau, cap, reach });
-      if (top && top.count >= 3) opts.push({ ...top, mirror, rot, H: Hk, d: Math.hypot(top.dx, top.dy) });
+      if (top && top.count >= 2) opts.push({ ...top, mirror, rot, H: Hk, d: Math.hypot(top.dx, top.dy) });
     }
     if (!opts.length) return false;
     const byRot = [0, 1, 2, 3].map((rot) => opts.filter((o) => o.rot === rot).sort((a, b) => b.score - a.score)[0]).filter(Boolean).sort((a, b) => b.score - a.score);
@@ -273,7 +296,7 @@ export class Tracker {
       const px = applyH(H, p.X, p.Y), s = scaleAt(H, p.X, p.Y);
       const base = ((p.set === 'row' ? 6 : 10) + 0.05 * motion) * s + 2;
       const r = base + 0.3 * speed * dt, ro = base + 0.15 * speed;
-      const tau = Math.max(FLOOR, 0.3 * this.signal[p.colour]);
+      const tau = Math.max(FLOOR, TAU_SHARE * this.signal[p.colour]);
       // P is where the set IS (fresh), N where it WAS. The real maps are the max over several older pictures, so a set that is lit now shows in N too,
       // at the place it had in an older picture of the same phase, and about as strong: when both answer, the fresh one is taken. A set that has just
       // gone dark answers in N only (P has only strays there, weaker): the stronger one then.

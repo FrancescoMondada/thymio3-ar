@@ -7,7 +7,7 @@
 // together. It does not know how much light an LED gives out sideways (it draws every LED as bright from
 // every side): that is what the test on a real robot is for.
 //
-// `?demo&elev=30` holds the view at 30° instead of swinging. `&dist=700` puts the camera 700 mm away instead of 380 (the phone of the 8th report: 0.65 px/mm in a picture 640 px long), `&rowgain=0.5` makes the green LEDs half as bright. The page tells it which LEDs the robot is asked to light
+// `?demo&elev=30` holds the view at 30° instead of swinging. `&dist=700` puts the camera 700 mm away instead of 380 (the phone of the 8th report: 0.65 px/mm in a picture 640 px long), `&rowgain=0.5` makes the green LEDs half as bright, `&rowmm=8` moves the LEDs of the row 8 mm along it (half a gap of a group). The page tells it which LEDs the robot is asked to light
 // (the 16 green Lego LEDs, 4 aligned ones, the amber arcs of the ring, or the row and the ring in turn). `&blink` makes the 16 LEDs blink as the robot's script
 // does; `&extra` adds steady lights of other colours (a blue one, a red glow, a ring of amber ones), as on the real
 // robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles; `&sway=40` swings it 40 px
@@ -63,7 +63,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12, dist = 380, rowGain = 1 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12, dist = 380, rowGain = 1, rowShift = 0 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -71,7 +71,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
   const t0 = performance.now();
   const body = roundedRect(110, 112, 16);
   const pad = circle(24, 0, 26);               // the touch pad, near the nose (y_svg = -26)
-  const leds = ledPositions();
+  const leds = ledPositions().map((p) => [p[0] + rowShift, p[1], p[2]]);      // rowShift: the LEDs further along the row than the page believes (a robot whose layout is not the one assumed)
   const HEIGHT = 50;                           // mm, the body under the top face
   const view = { elev: 90, motion: 0 };
 
