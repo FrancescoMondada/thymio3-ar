@@ -4,6 +4,10 @@
 // an LED that is lit in one picture and not in the other shows in the difference WHEREVER it is in the picture, and
 // the body, the table and the steady lights of the robot (they have the same colour in both) are gone.
 //
+// (With `measure: 'amber'` the same is done for the amber arcs of the ring round the touch pad, with the amber excess
+// R >= G ? max(0, G - B) : 0: on the photo of the robot with 6 of the 8 arcs lit it finds exactly those 6, and none of
+// the wooden table, the magenta and cyan glows, the red glow or the green LEDs.)
+//
 // For each picture the green excess gp = max(0, G - max(R, B)) of every pixel is kept. A lit LED of the robot gives
 // 170 to 210 on the user's photos (stud (152,167,158) -> lit rim (143,251,19); its white-hot core gives less, the rim
 // stays); anything that is not green gives 0 or close: the grey body and table (a few units), a white reflection, an
@@ -25,7 +29,9 @@
 import { SpotFinder } from './detect.js';
 
 export class PairDiff {
-  constructor({ halfMs, lo = 0.4, hi = 1.6, cap = 24 } = {}) {
+  // measure: 'green' (the 16 Lego LEDs: G - max(R, B)) or 'amber' (the ring arcs: G - B where R >= G, else 0)
+  constructor({ halfMs, lo = 0.4, hi = 1.6, cap = 24, measure = 'green' } = {}) {
+    this.measure = measure;
     this.halfMs = halfMs;
     this.lo = lo;
     this.hi = hi;
@@ -74,9 +80,17 @@ export class PairDiff {
     }
     const n = w * h;
     const cur = this.ring[this.head] || (this.ring[this.head] = new Uint8Array(n));
-    for (let i = 0, j = 0; i < n; i++, j += 4) {
-      const r = rgba[j], b = rgba[j + 2], g = rgba[j + 1] - (r > b ? r : b);
-      cur[i] = g > 0 ? g : 0;
+    if (this.measure === 'amber') {
+      // amber arcs (255,190,20): 170; the green LEDs (R < G): 0; the wooden table (210,150,90): 60, but steady; white: 0
+      for (let i = 0, j = 0; i < n; i++, j += 4) {
+        const r = rgba[j], g = rgba[j + 1], a = r >= g ? g - rgba[j + 2] : 0;
+        cur[i] = a > 0 ? a : 0;
+      }
+    } else {
+      for (let i = 0, j = 0; i < n; i++, j += 4) {
+        const r = rgba[j], b = rgba[j + 2], g = rgba[j + 1] - (r > b ? r : b);
+        cur[i] = g > 0 ? g : 0;
+      }
     }
     this.times[this.head] = tMs;
     const { P, N } = this;

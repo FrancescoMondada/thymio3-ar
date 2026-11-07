@@ -59,7 +59,7 @@
         <canvas id="view" width="640" height="360"></canvas>
         <div id="splash">
           <h1>Test : retrouver les LED du Thymio avec la caméra</h1>
-          <p>Posez le robot sur la table, quelques LED du dessus qui clignotent (le bouton « Robot » plus bas les fait clignoter : 4 LED alignées d'une rangée, une sur deux, car côte à côte elles se confondent). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
+          <p>Posez le robot sur la table, quelques LED du dessus qui clignotent (le bouton « Robot » plus bas les fait clignoter : 4 LED alignées d'une rangée, une sur deux, et 4 arcs du cercle en carré, à tour de rôle, car côte à côte les LED se confondent). Tenez la tablette au-dessus, à 20 – 60 cm. La page compte les points lumineux et mesure la vitesse.</p>
           <div class="row">
             <button class="primary" id="startBack">Caméra arrière</button>
             <button id="startFront">Caméra avant</button>
@@ -73,12 +73,15 @@
           <h2>Points lumineux</h2>
           <div class="big" id="count">–</div>
           <div class="note" id="countNote">–</div>
+          <div class="note" id="parallel"></div>
         </section>
         <section>
           <h2>Vu de côté ?</h2>
           <div class="big" id="angle" style="font-size:28px">n/d</div>
           <div class="note" id="angleNote">Angle entre l'axe de la caméra et la table : 90° = de face au-dessus, 0° = à ras de la table. Inclinez la tablette peu à peu : le tableau compte les points vus à chaque angle.</div>
           <table id="angleTable" style="margin-top:6px"></table>
+          <div class="note" id="motionNow" style="margin-top:8px">Téléphone : –</div>
+          <table id="motionTable" style="margin-top:4px"></table>
           <button id="resetAngles" style="width:100%; margin-top:6px">Remettre le tableau à zéro</button>
         </section>
         <section>
@@ -97,9 +100,9 @@
           <h2>Réglages</h2>
           <label>Détection
             <select id="detect">
-              <option value="diff" selected>par différence de deux images (le téléphone peut bouger)</option>
-              <option value="blink">par clignotement sur 1 s (téléphone posé)</option>
-              <option value="bright">par luminosité (LED fixes)</option>
+              <option value="diff" selected>différence de 2 images (main qui bouge)</option>
+              <option value="blink">clignotement sur 1 s (posé)</option>
+              <option value="bright">luminosité (LED fixes)</option>
             </select>
           </label>
           <p class="note" id="detectNote" style="margin:0 0 4px"></p>
@@ -160,15 +163,24 @@
               <option value="off">éteintes</option>
             </select>
           </label>
-          <label>Lesquelles
+          <label>LED vertes
             <select id="ledGroup">
               <option value="0" selected>4 alignées : avant A</option>
               <option value="1">4 alignées : avant B</option>
               <option value="2">4 alignées : arrière A</option>
               <option value="3">4 alignées : arrière B</option>
               <option value="-1">les 16</option>
+              <option value="-2">aucune</option>
             </select>
           </label>
+          <label>Arcs ambre
+            <select id="circleSet">
+              <option value="1" selected>carré NE SE SW NW</option>
+              <option value="0">carré N E S W</option>
+              <option value="-1">aucun</option>
+            </select>
+          </label>
+          <p class="note" style="margin:0 0 4px">Avec des LED vertes et des arcs, ils clignotent à tour de rôle : la couleur dit lequel est lequel.</p>
           <label>Vitesse
             <select id="blinkSpeed">
               <option value="400">lente : 1,25 Hz</option>

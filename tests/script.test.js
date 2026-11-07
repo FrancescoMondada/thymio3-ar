@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { HALF_MS, HALF_CHOICES, BLINK_HZ, MODES, GROUPS, buildScript, groupMembers, countOf, hzOf, windowOf } from '../src/script.js';
+import { HALF_MS, HALF_CHOICES, BLINK_HZ, MODES, GROUPS, CIRCLES, buildScript, groupMembers, circleMembers, countOf, isAlternating, hzOf, windowOf } from '../src/script.js';
 
 const raw = readFileSync(new URL('../src/py/leds_lego.py', import.meta.url), 'utf8');
 
@@ -31,6 +31,26 @@ test('buildScript also writes the half period and the group of LEDs, each in its
   assert.throws(() => buildScript(raw, 'blink', 5), /half period/);
   assert.throws(() => buildScript(raw, 'blink', 200, 4), /group/);
   assert.throws(() => buildScript(raw.replace(/^GROUP.*$/m, ''), 'blink'), /GROUP line/);
+  assert.throws(() => buildScript(raw.replace(/^CIRCLE.*$/m, ''), 'blink'), /CIRCLE line/);
+  assert.throws(() => buildScript(raw, 'blink', 200, 0, 2), /ring/);
+});
+
+test('the ring: even arcs N E S W or odd arcs NE SE SW NW, 4 each, and the alternation of a group and a set', () => {
+  assert.deepEqual(CIRCLES, [-1, 0, 1]);
+  assert.deepEqual(circleMembers(-1), []);
+  assert.deepEqual(circleMembers(0).map((m) => m.i), [0, 2, 4, 6]);
+  assert.deepEqual(circleMembers(1).map((m) => m.i), [1, 3, 5, 7]);
+  assert.ok(circleMembers(1).every((m) => m.row === 'circle'));
+  assert.equal(countOf(0, 1), 8);
+  assert.equal(countOf(-2, 1), 4);
+  assert.equal(countOf(-1, 0), 20);
+  assert.equal(countOf(-2, -1), 0);
+  assert.equal(isAlternating(0, 1), true);
+  assert.equal(isAlternating(-2, 1), false, 'a ring set alone just blinks');
+  assert.equal(isAlternating(0, -1), false);
+  const text = buildScript(raw, 'blink', 100, 3, 1);
+  assert.ok(/^CIRCLE = 1$/m.test(text) && /^GROUP = 3$/m.test(text) && /^HALF_MS = 100/m.test(text));
+  assert.equal(text.split('\n').length, raw.split('\n').length);
 });
 
 test('the groups: 4 LEDs each, aligned on one row 16 mm apart, together the 16', () => {
@@ -46,7 +66,8 @@ test('the groups: 4 LEDs each, aligned on one row 16 mm apart, together the 16',
     for (let k = 1; k < 4; k++) assert.equal(cols[k] - cols[k - 1], 2, `group ${g}: every other LED of the row, 16 mm apart`);
   }
   assert.equal(seen.size, 16);
-  assert.deepEqual(GROUPS, [-1, 0, 1, 2, 3]);
+  assert.deepEqual(GROUPS, [-2, -1, 0, 1, 2, 3]);
+  assert.equal(groupMembers(-2).length, 0, 'no Lego LED');
 });
 
 test('the window is 2.5 periods of the blink, whatever its speed', () => {

@@ -4,6 +4,7 @@ import { PairDiff } from '../src/pairdiff.js';
 import { LockIn } from '../src/lockin.js';
 import { SpotFinder } from '../src/detect.js';
 import { BLINK_HZ, HALF_MS, windowOf } from '../src/script.js';
+import { pickSquare } from '../src/square.js';
 import { W, H, LEDS, rng, frame, times } from './scene.js';
 
 const SIZE = { minArea: 3, maxArea: 600 };
@@ -178,5 +179,62 @@ test('speed of the pair difference (reported, loosely bounded)', () => {
     const ms = (performance.now() - t0) / runs;
     console.log(`  pair difference ${w}x${h}: ${ms.toFixed(1)} ms per picture in Node`);
     assert.ok(ms < 100);
+  }
+});
+
+// ---- the ring arcs (amber), blinking in turn with a row of 4 Lego LEDs --------------------------------------------------
+const RING = { x: 52, y: 90, r: 26 };                                   // px, in the shared scene: left part of the body
+const ROW = [0, 2, 4, 6].map((k) => LEDS[k]);                           // front row, every other LED: 4 aligned
+const ARC_SIZE = { minArea: 4, maxArea: 800, minFill: 0.1, maxAspect: 8 };
+const arcCentre = (i, dx = 0, dy = 0) => ({ x: RING.x + dx + RING.r * Math.sin((i * Math.PI) / 4), y: RING.y + dy - RING.r * Math.cos((i * Math.PI) / 4) });
+
+// amber arcs i (N = 0 up, clockwise, 45 degrees apart): 34 degrees long, 4 px thick, painted into a picture moved by (dx, dy)
+function paintArcs(f, ids, dx, dy, rgb = [255, 190, 20]) {
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const ex = x - (RING.x + dx), ey = y - (RING.y + dy), r = Math.hypot(ex, ey);
+    if (Math.abs(r - RING.r) > 2) continue;
+    const phi = (Math.atan2(ex, -ey) * 180) / Math.PI;
+    if (ids.some((i) => Math.abs((((phi - i * 45 + 540) % 360) - 180)) <= 17)) { const k = (y * W + x) * 4; f[k] = rgb[0]; f[k + 1] = rgb[1]; f[k + 2] = rgb[2]; }
+  }
+}
+
+// the video of the ping-pong: the Lego row is on while the arcs are off and the other way round; the picture sways
+function pingPong({ ids = [1, 3, 5, 7], fps = 25, jitter = 2, count = 200, sway = 0, seed = 7, steady = false }) {
+  const rnd = rng(seed), green = new PairDiff({ halfMs: HALF_MS }), amber = new PairDiff({ halfMs: HALF_MS, measure: 'amber' });
+  const out = [];
+  for (const t of times(count, { fps, jitter, rnd })) {
+    const ph = 2 * Math.PI * SWAY_HZ * ((t - 1000) / 1000), dx = sway * Math.sin(ph), dy = 0.5 * sway * Math.sin(ph + 1);
+    const lit = ((t / 1000) * BLINK_HZ) % 1 < 0.5;
+    const f = frame({ on: lit, rnd, dx, dy, leds: ROW });
+    paintArcs(f, ids, dx, dy);                                                  // (the ring first: it blinks in turn, see below)
+    if (lit) { const g = frame({ on: true, rnd, dx, dy, leds: ROW }); f.set(g); }             // row on, ring off
+    else { const g = frame({ on: false, rnd, dx, dy, leds: ROW }); paintArcs(g, ids, dx, dy); f.set(g); }   // row off, ring on
+    if (steady) for (const [x, y] of [[250, 150]]) for (let j = -4; j <= 4; j++) for (let i = -4; i <= 4; i++) { if (Math.hypot(i, j) > 4) continue; const q = ((Math.round(y + dy) + j) * W + Math.round(x + dx) + i) * 4; f[q] = 255; f[q + 1] = 200; f[q + 2] = 40; }
+    const a = amber.push(f, W, H, t), g = green.push(f, W, H, t);
+    if (a && g) out.push({ t, dx, dy, arcs: amber.find(50, ARC_SIZE), row: green.find(50, SIZE) });
+  }
+  return out;
+}
+const arcsFound = (e, ids, tol) => ids.filter((i) => { const c = arcCentre(i, e.dx, e.dy); return e.arcs.spots.some((s) => Math.hypot(s.x - c.x, s.y - c.y) <= tol); }).length;
+
+test('the amber arcs blinking in turn with the row: each set is found by its own colour, and only that set', () => {
+  const out = pingPong({}).filter((e) => e.t > 3000);
+  const ids = [1, 3, 5, 7];
+  assert.ok(out.length > 100);
+  assert.ok(out.filter((e) => arcsFound(e, ids, 9) === 4 && e.arcs.spots.length <= 6).length / out.length >= 0.95, 'the 4 arcs');
+  assert.ok(out.filter((e) => ROW.every((l) => e.row.spots.some((s) => Math.hypot(s.x - l.x, s.y - l.y) <= 9)) && e.row.spots.length <= 6).length / out.length >= 0.95, 'the 4 Lego LEDs');
+  // the green LEDs are not amber (R < G): the arcs' detector does not see the row, and the other way round
+  assert.ok(out.every((e) => e.arcs.spots.every((s) => Math.hypot(s.x - RING.x, s.y - RING.y) < RING.r + 10)), 'no arc spot outside the ring');
+});
+
+test('the same with a swaying hand, a steady amber light on the table, and the square filter: the 4 arcs and nothing else', () => {
+  const sway = (4 * LED_DIAMETER) / (2 * Math.PI * SWAY_HZ);
+  for (const [fps, jitter] of [[25, 2], [10, 8]]) {
+    const out = pingPong({ sway, fps, jitter, count: 8 * fps, steady: true }).filter((e) => e.t > 3000);
+    const ok = out.filter((e) => {
+      const sq = pickSquare(e.arcs.spots, { minSide: 8 });
+      return sq.full && [1, 3, 5, 7].every((i) => { const c = arcCentre(i, e.dx, e.dy); return sq.chosen.some((s) => Math.hypot(s.x - c.x, s.y - c.y) <= 14); });
+    }).length / out.length;
+    assert.ok(ok >= 0.85, `${fps} pictures a second: ${(100 * ok).toFixed(0)} % of the pictures have the square`);
   }
 });

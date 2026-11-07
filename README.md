@@ -34,6 +34,19 @@ robot, et à 2,5 Hz une demi-période dure environ 6 images de caméra.
   fait échouer le deuxième essai sur téléphone (voir plus bas). Deux signaux : *couleur* (par défaut) et *toute variation*.
 - **Par luminosité** (LED fixes) : plus clair que le seuil *et* que les voisins, de forme ronde, avec la couleur du point.
 
+**Deuxième jeu : 4 arcs du cercle** (étape 1 de la pose, `src/square.js`). Les 8 LED du cercle autour du pavé sont des arcs ambre
+d'environ 45° (le firmware les nomme N, NE, E, SE, S, SW, W, NW). Le robot peut en faire clignoter 4 : **NE SE SW NW** (un
+carré dont les côtés sont parallèles aux axes du robot, donc deux d'entre eux à la rangée de LED vertes si le nord pointe vers
+le nez) ou **N E S W** (un carré tourné de 45°). Avec des LED vertes ET des arcs, ils clignotent **à tour de rôle** (la rangée est
+allumée quand le cercle est éteint, et inversement) ; la couleur dit lequel est lequel : vert pour la rangée, ambre pour les
+arcs (`PairDiff` avec la mesure *ambre* `R ≥ G ? max(0, G − B) : 0` : sur la photo où 6 des 8 arcs sont allumés, elle trouve
+exactement ces 6, et ni le bois de la table, ni les lueurs du corps, ni la lueur rouge, ni les LED vertes).
+Filtre de forme : de tous les points ambre, la page garde 4 points qui font un quadrilatère convexe pas trop plat (côtés
+opposés et diagonales dans des rapports plausibles pour un carré vu en perspective). **Parallélisme** : le point de fuite de
+deux côtés opposés doit se trouver sur la droite de la rangée ; l'écart est mesuré et affiché (≈ 0,02 si les côtés sont
+parallèles à la rangée, 0,3 à 0,7 pour le carré tourné de 45°), pas imposé (option `preferParallel`, désactivée tant qu'on n'a pas
+vu sur le robot que le nord du cercle pointe vers le nez).
+
 **Filtre d'alignement** (`src/aligned.js`, quand 4 LED clignotent) : de tous les points trouvés, la page ne garde que 4
 (ou 3, signalé) **sur une droite, à intervalles réguliers** : les écarts le long de la droite ne varient que
 progressivement (jamais plus de 1,8 fois le voisin, 3 fois le plus petit), les points sont à moins de 6 % de la longueur
@@ -43,15 +56,18 @@ progressivement (jamais plus de 1,8 fois le voisin, 3 fois le plus petit), les p
 
 - **Caméra** (arrière par défaut) ou **scène simulée** : `?demo`, avec `&blink` (LED clignotantes), `&extra` (lumières fixes
   d'autres couleurs), `&shake=2` (la main qui tremble), `&sway=20` (le téléphone qui balance à la main, 20 px de chaque côté),
-  `&elev=30` (angle fixé), `&group=-1` (les 16 LED), `&half=100` (clignotement 5 Hz), `&detect=blink` (autre détection). Elle ne montre que la *géométrie* (quand les
+  `&elev=30` (angle fixé), `&group=-1` (les 16 LED ; `-2` : aucune), `&circle=0` (arcs N E S W ; `-1` : aucun), `&half=100` (clignotement 5 Hz), `&detect=blink` (autre détection). Elle ne montre que la *géométrie* (quand les
   LED se touchent dans l'image), pas la vraie lumière des LED vues de côté.
 - **Vu de côté ?** : l'angle entre l'axe de la caméra et la table (capteur d'orientation) et un tableau « combien de
-  points vus à chaque angle », par tranches de 15°.
+  points vus à chaque angle », par tranches de 15°. Dessous : **le mouvement du téléphone** (gyroscope, `devicemotion`, en °/s) et un
+  tableau « part des images où tous les points sont trouvés » selon qu'il est immobile (< 5 °/s), lent (5 à 30) ou rapide (> 30) :
+  il dira d'où viennent les images perdues.
 - **Vitesse** : images reçues et analysées par seconde, retard caméra → page, durée de lecture et de recherche, et **images
   analysées par période de clignotement** (il en faut au moins 5). La taille analysée se règle par le **côté long** (480 px par
   défaut) : un téléphone tenu droit donne du 720×1280.
 - **Robot** : *Connecter le robot et lancer* envoie `leds_lego.py` au robot, avec le mode choisi (LED clignotantes,
-  allumées en continu, éteintes), le groupe (une des 4 rangées partielles de 4 LED, ou les 16) et la vitesse ; changer l'un d'eux renvoie le script. Il faut un script **sur le robot** : le comportement par défaut (gyroscope), le mode
+  allumées en continu, éteintes), les LED vertes (une des 4 rangées partielles de 4 LED, les 16, ou aucune), les arcs ambre
+  (carré NE SE SW NW, carré N E S W, ou aucun ; par défaut : avant A + carré NE SE SW NW, en alternance) et la vitesse ; changer l'un d'eux renvoie le script. Il faut un script **sur le robot** : le comportement par défaut (gyroscope), le mode
   leçons et le mode cartes dessinent déjà sur ces LED, et une commande Bluetooth serait écrasée (elle ne monte d'ailleurs
   qu'à 15 : 15/16 de PWM à 50 Hz scintille, 16 non). Tant qu'il tourne, ces affichages sont interrompus.
 - **Rapport** : tout ce qui précède en texte, à copier.
@@ -126,7 +142,7 @@ Mesuré sur des **vidéos synthétiques** (pas sur un robot) :
   toutes les 90 ms, toutes les images sont gardées).
 - scène simulée par luminosité (géométrie seule, 380 mm) : 16 points sur 16 jusqu'à 30°, dans 8 % des images à 20°, aucun à 10°.
 
-**Jamais essayé** : les angles de 0 à 15° ; une tablette ; l'autre rangée et l'autre groupe ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
+**Jamais essayé** : les arcs du cercle avec le téléphone et le robot (l'ordre et la direction des indices du cercle, le nord vers le nez, l'alternance avec la rangée) ; le mouvement mesuré par le gyroscope du téléphone ; les angles de 0 à 15° ; une tablette ; l'autre rangée et l'autre groupe ; l'ordre des LED dans la rangée (je suppose qu'il est linéaire : confirmé seulement par « les 4 LED du quart sont bien écartées ») ; le script (modes `blink`, `on`, `off`) sur un vrai robot (ses
 appels sont ceux de `thymio3-cards/src/py/lights.py`, qui ont tourné sur un vrai robot) ; la régularité réelle du clignotement
 (`time.sleep_ms` en MicroPython) ; l'effet de l'exposition automatique et de l'obturateur à balayage sur des LED qui clignotent ;
 la détection par clignotement sur une vraie photo ou vidéo (il faut une paire éteintes/allumées, ou la page sur téléphone).

@@ -10,7 +10,8 @@ import { viewAngleDeg, AngleTable } from './angle.js';
 import { LockIn } from './lockin.js';
 import { PairDiff } from './pairdiff.js';
 import { pickAligned } from './aligned.js';
-import { HALF_MS, HALF_CHOICES, GROUPS, hzOf, windowOf, countOf, buildScript } from './script.js';
+import { pickSquare } from './square.js';
+import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
 
 const $ = (id) => document.getElementById(id);
@@ -21,17 +22,23 @@ const canvas = $('view');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
 const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
+const pdiffAmber = new PairDiff({ halfMs: HALF_MS, measure: 'amber' });    // the same for the amber arcs of the ring
 const lock = new LockIn({ hz: hzOf(HALF_MS), windowMs: windowOf(HALF_MS), computeEvery: 90 });    // the sums are done at most every 90 ms: the pictures are all kept
 
 // detect: 'diff' (what turns on or off between two pictures half a period apart: pairdiff.js), 'blink' (what blinks at the
 // robot's rhythm over a second: lockin.js, needs a phone that does not move) or 'bright' (the bright spots of each picture)
 const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: 480,
   halfMs: HALF_CHOICES.includes(Number(params.get('half'))) ? Number(params.get('half')) : HALF_MS,        // the LEDs blink this long on, this long off
-  group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0 };   // 0..3: 4 LEDs aligned on one row, 16 mm apart; -1: the 16
-const expected = () => (state.detect !== 'bright' || robot.on ? countOf(state.group) : 16);    // how many points there should be
+  group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0,    // Lego LEDs: 0..3: 4 aligned on one row, 16 mm apart; -1: the 16; -2: none
+  circle: CIRCLES.includes(Number(params.get('circle'))) && params.has('circle') ? Number(params.get('circle')) : 1 };    // ring arcs: 1: NE SE SW NW (a square, sides parallel to the row); 0: N E S W; -1: none. With a group they blink in turn
+const lineOn = () => state.group !== -2;                               // the Lego LEDs are asked for
+const squareOn = () => state.detect === 'diff' && state.circle >= 0;     // the ring arcs, looked for by the difference only (amber)
+const expectedLine = () => (state.detect !== 'bright' || robot.on ? (lineOn() ? countOf(state.group) : 0) : 16);
+const expected = () => expectedLine() + (squareOn() ? 4 : 0);          // how many points there should be
 const blinkHz = () => hzOf(state.halfMs);
-const groupLabel = (g) => (g < 0 ? 'les 16 LED' : `4 LED alignées, rangée ${g < 2 ? 'avant' : 'arrière'} ${g % 2 ? 'B' : 'A'}`);
-const alignOn = () => expected() === 4;                         // 4 LEDs on a line: the line is a filter
+const groupLabel = (g) => (g === -2 ? 'pas de LED Lego' : g < 0 ? 'les 16 LED' : `4 LED alignées, rangée ${g < 2 ? 'avant' : 'arrière'} ${g % 2 ? 'B' : 'A'}`);
+const alignOn = () => lineOn() && state.group >= 0;                    // 4 LEDs on a line: the line is a filter
+const circleLabel = (c) => (c < 0 ? 'pas de cercle' : c === 0 ? 'arcs N E S W' : 'arcs NE SE SW NW');
 
 // what is measured, over the last frames
 const win = {
@@ -53,8 +60,22 @@ function resetWindows() {
 // at which angle" is what answers "are they seen from the side too"; it starts again when a setting that changes
 // the count (threshold, analysed width, camera) changes.
 let sensor = { beta: NaN, gamma: NaN, seen: false };
+
+// how fast the phone moves (deg/s, smoothed over about 0.3 s): its gyroscope. The simulated scene knows it. The table tells how
+// often the full set of points is found while it is still, moving slowly, or moving fast.
+let motion = { rate: NaN, seen: false };
+let motionStats = [0, 1, 2].map(() => ({ frames: 0, full: 0 }));
+const MOTION_LABELS = ['immobile (< 5 °/s)', 'lent (5 à 30 °/s)', 'rapide (> 30 °/s)'];
+const currentMotion = () => (state.cam?.motion ? state.cam.motion() : motion.rate);
+const motionClass = (r) => (!Number.isFinite(r) ? -1 : r < 5 ? 0 : r < 30 ? 1 : 2);
+addEventListener('devicemotion', (e) => {
+  const r = e.rotationRate;
+  if (!r) return;
+  const v = Math.hypot(r.alpha || 0, r.beta || 0, r.gamma || 0);
+  motion = { rate: Number.isFinite(motion.rate) ? 0.8 * motion.rate + 0.2 * v : v, seen: true };
+});
 let angles = new AngleTable(16);
-const resetAngles = () => { angles = new AngleTable(expected()); };
+const resetAngles = () => { angles = new AngleTable(expected()); motionStats = [0, 1, 2].map(() => ({ frames: 0, full: 0 })); };
 
 const currentAngle = () => {
   if (state.cam?.angle) return state.cam.angle();                       // the simulated scene knows it
@@ -64,8 +85,9 @@ const currentAngle = () => {
 // iOS asks for a permission, from a tap; elsewhere the events just come
 async function enableOrientation() {
   try {
-    const DOE = window.DeviceOrientationEvent;
+    const DOE = window.DeviceOrientationEvent, DME = window.DeviceMotionEvent;
     if (DOE && typeof DOE.requestPermission === 'function') await DOE.requestPermission();
+    if (DME && typeof DME.requestPermission === 'function') await DME.requestPermission();
   } catch { /* refused: the angle stays n/d */ }
 }
 addEventListener('deviceorientation', (e) => {
@@ -102,8 +124,20 @@ function tick(cam, now, meta) {
     const size = { minArea: 2, maxArea: Math.max(50, (W * H) / 150) };
     let res;
     if (state.detect === 'diff') {
+      // two sets can blink: the Lego LEDs (green) and the ring arcs (amber, long thin blobs: looser shape limits)
       const t = meta.captureTime != null ? meta.captureTime : now;
-      res = pdiff.push(img.data, W, H, t) ? pdiff.find(state.blinkThreshold, size) : { spots: [], brightest: 0, lit: 0, waiting: true };
+      const arcSize = { minArea: 4, maxArea: Math.max(80, (W * H) / 20), minFill: 0.1, maxAspect: 8 };
+      let waiting = false, brightest = 0;
+      const spots = [];
+      if (lineOn()) {
+        if (pdiff.push(img.data, W, H, t)) { const r = pdiff.find(state.blinkThreshold, size); for (const sp of r.spots) sp.set = 'line'; spots.push(...r.spots); brightest = Math.max(brightest, r.brightest); }
+        else waiting = true;
+      }
+      if (squareOn()) {
+        if (pdiffAmber.push(img.data, W, H, t)) { const r = pdiffAmber.find(state.blinkThreshold, arcSize); for (const sp of r.spots) sp.set = 'ring'; spots.push(...r.spots); brightest = Math.max(brightest, r.brightest); }
+        else waiting = true;
+      }
+      res = waiting ? { spots: [], brightest: 0, lit: 0, waiting: true } : { spots, brightest, lit: 0 };
     } else if (blink) {
       if (lock.push(img.data, W, H, meta.captureTime != null ? meta.captureTime : now)) {
         win.cache = finder.findFromValues(state.signal === 'color' ? lock.chroma : lock.amp, W, H, state.blinkThreshold, size);
@@ -113,14 +147,27 @@ function tick(cam, now, meta) {
       res = finder.find(img.data, W, H, state.threshold, { contrast: state.contrast, radius: Math.max(4, Math.round(W / 80)), ...size });
     }
     const c = performance.now();
-    if (state.mask && !res.waiting) { (state.detect === 'diff' ? pdiff : finder).paintMask(img.data); ctx.putImageData(img, 0, 0); }
+    if (state.mask && !res.waiting) {
+      if (state.detect !== 'diff') finder.paintMask(img.data);
+      else { if (lineOn()) pdiff.paintMask(img.data); if (squareOn()) pdiffAmber.paintMask(img.data); }
+      ctx.putImageData(img, 0, 0);
+    }
     // the spots that count: all of them, or the green ones (the 16 Lego LEDs; the ring round the pad and the body
     // LEDs are other colours and also bright); a blinking spot has no colour: they all count
     let counted = blink || state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
-    // 4 LEDs of a row blink: of everything the detector finds, only 3 or 4 spots on a straight line at even gaps are the LEDs
-    const aligned = alignOn() && !res.waiting ? pickAligned(counted) : null;
-    if (aligned) counted = aligned.chosen;
-    drawSpots(res.spots, counted, aligned);
+    // 4 LEDs of a row blink: of everything the detector finds, only 3 or 4 spots on a straight line at even gaps are the LEDs;
+    // 4 arcs of the ring blink: only 4 spots that are the corners of a convex quadrilateral (a square seen in perspective), the
+    // ones whose opposite sides point where the row points being preferred (they should be parallel to it)
+    const lineSpots = counted.filter((sp) => sp.set !== 'ring'), ringSpots = counted.filter((sp) => sp.set === 'ring');
+    let aligned = null, square = null, chosenLine = lineSpots, chosenRing = ringSpots;
+    if (alignOn() && !res.waiting) { aligned = pickAligned(lineSpots); chosenLine = aligned.chosen; }
+    if (squareOn() && !res.waiting) {
+      const rowLine = aligned && aligned.chosen.length >= 3 ? { p: aligned.chosen[0], q: aligned.chosen[aligned.chosen.length - 1] } : null;
+      square = pickSquare(ringSpots, { rowLine });
+      chosenRing = square.chosen;
+    }
+    counted = [...chosenLine, ...chosenRing];
+    drawSpots(res.spots, counted, aligned, square);
 
     win.read.push(b - a);
     win.find.push(c - b);
@@ -129,8 +176,10 @@ function tick(cam, now, meta) {
       win.counts.push(counted.length);
       win.weights.push(counted.reduce((s, p) => s + p.weight, 0));
       angles.add(currentAngle(), counted.length);       // zeros count too: "no LED at all from 20°" is the answer, not a gap
+      const mc = motionClass(currentMotion());
+      if (mc >= 0) { motionStats[mc].frames++; if (counted.length === expected()) motionStats[mc].full++; }
     }
-    win.last = { ...res, spots: counted, found: res.spots, aligned };
+    win.last = { ...res, spots: counted, found: res.spots, aligned, square };
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
       if (win.frames.length > 30) win.frames.shift();
@@ -142,22 +191,29 @@ function tick(cam, now, meta) {
 }
 
 // green circle: counted; grey circle: a spot of another colour, not counted
-function drawSpots(spots, counted, aligned) {
+function drawSpots(spots, counted, aligned, square) {
   const k = canvas.width / Math.max(1, canvas.clientWidth);        // canvas pixels per screen pixel
   ctx.lineWidth = 1.5 * k;
   const keep = new Set(counted);
   for (const s of spots) {
     const r = Math.max(6 * k, Math.sqrt(s.area / Math.PI) * 1.5 + 3 * k);
-    ctx.strokeStyle = keep.has(s) ? '#3ddc97' : '#8a93b3';
+    ctx.strokeStyle = keep.has(s) ? (s.set === 'ring' ? '#ffb454' : '#3ddc97') : '#8a93b3';
     ctx.beginPath();
     ctx.arc(s.x, s.y, r, 0, 2 * Math.PI);
     ctx.stroke();
   }
-  if (aligned && counted.length >= 2) {                             // the line the LEDs are on
+  if (aligned && aligned.chosen.length >= 2) {                      // the line the LEDs are on
     ctx.strokeStyle = 'rgba(61, 220, 151, 0.6)';
     ctx.beginPath();
-    ctx.moveTo(counted[0].x, counted[0].y);
-    ctx.lineTo(counted[counted.length - 1].x, counted[counted.length - 1].y);
+    ctx.moveTo(aligned.chosen[0].x, aligned.chosen[0].y);
+    ctx.lineTo(aligned.chosen[aligned.chosen.length - 1].x, aligned.chosen[aligned.chosen.length - 1].y);
+    ctx.stroke();
+  }
+  if (square && square.chosen.length === 4) {                       // the quadrilateral the arcs make
+    ctx.strokeStyle = 'rgba(255, 180, 84, 0.6)';
+    ctx.beginPath();
+    square.chosen.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y)));
+    ctx.closePath();
     ctx.stroke();
   }
 }
@@ -185,16 +241,22 @@ function refreshPanel() {
   big.className = `big ${!state.cam ? 'dim' : steady ? 'ok' : n === 0 ? 'dim' : 'warn'}`;
   big.innerHTML = state.cam ? `${n}<small>sur ${exp}</small>` : '–';
   const blink = state.detect !== 'bright';
-  $('countNote').textContent = !state.cam ? (exp === 16 ? 'Il doit y en avoir 16 (2 rangées de 8).' : `Il doit y en avoir ${exp} (4 LED d'une rangée du dessus, alignées).`)
+  $('countNote').textContent = !state.cam ? (exp === 16 ? 'Il doit y en avoir 16 (2 rangées de 8).' : `Il doit y en avoir ${exp} (${[lineOn() ? (alignOn() ? '4 LED alignées d\'une rangée' : 'les 16 LED') : '', squareOn() ? '4 arcs du cercle en carré' : ''].filter(Boolean).join(' + ')}).`)
     : win.last.waiting ? (state.detect === 'blink' ? `Attente de ${(lock.windowMs / 1000).toFixed(1)} s d'images (au moins ${lock.minFrames}) pour mesurer le clignotement…` : 'Attente d\'une image assez ancienne pour la comparer…')
     : `Sur les ${counts.count} dernières images : de ${counts.min} à ${counts.max}${blink ? '' : ` (points vus : ${colorsText(win.last.found || [])})`}. ` +
-      (steady ? `Les ${exp} LED sont vues, image après image${alignOn() ? `, retenues parmi ${(win.last.found || []).length} points parce qu'elles sont alignées` : ''}.`
+      (steady ? `Les ${exp} points sont vus, image après image${alignOn() || squareOn() ? `, retenus parmi ${(win.last.found || []).length} points trouvés (alignement, forme)` : ''}.`
         : n === 0 ? (blink ? `Aucun point ne clignote à ${blinkHz().toFixed(1)} Hz : le robot clignote-t-il (bouton Robot, LED clignotantes) ? seuil trop haut ?` : 'Rien au-dessus du seuil : LED éteintes ? seuil trop haut ?')
-        : n === 0 && alignOn() && (win.last.found || []).length > 0 ? `${win.last.found.length} point(s) trouvé(s), mais pas 3 alignés à intervalles réguliers : ce sont des parasites, ou les LED sont cachées ou collées.`
+        : n === 0 && (alignOn() || squareOn()) && (win.last.found || []).length > 0 ? `${win.last.found.length} point(s) trouvé(s), mais ni 3 alignés à intervalles réguliers ni 4 en carré : des parasites, ou les LED sont cachées ou collées.`
         : n < exp ? (blink ? `Moins de ${exp} : LED cachées ou collées, image qui bouge trop, seuil trop haut ; ou le robot ne clignote pas encore.` : `Moins de ${exp} : LED éteintes ou cachées, ou points collés (essayez 960 / 1280 px, ou rapprochez-vous).`)
         : n === exp ? `Le compte est bon à cet instant mais pas stable : ${counts.min} à ${counts.max} (une LED se perd ou un point s'ajoute de temps en temps).`
         : (blink ? `Plus de ${exp} : quelque chose d'autre clignote ou la scène bouge ; remontez le seuil.` : `Plus de ${exp} : des reflets ? remontez le seuil.`));
 
+  if (state.cam && !win.last.waiting && squareOn() && lineOn()) {
+    const nl = win.last.spots.filter((sp) => sp.set !== 'ring').length, nr = win.last.spots.length - nl;
+    $('countNote').textContent += ` Rangée : ${nl}/${expectedLine()}, carré : ${nr}/4.`;
+  }
+  const vp = win.last.square?.vanishing;
+  $('parallel').textContent = !squareOn() ? '' : vp ? `Parallélisme carré / rangée : écart ${fmt(vp.residual, 3)} (${vp.residual < 0.05 ? 'les côtés sont parallèles à la rangée' : 'pas parallèles : essayez l\'autre jeu d\'arcs'}).` : win.last.square?.full ? 'Parallélisme : il faut au moins 3 LED de la rangée.' : '';
   $('detectNote').textContent = blink && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : cette détection ne verra rien (choisissez « LED clignotantes »).'
     : state.detect === 'bright' && robot.on && robot.mode === 'blink' ? 'Les LED clignotent : la détection par luminosité ne les voit qu\'une image sur deux (choisissez « allumées en continu »).'
     : state.detect === 'diff' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection compare deux images : le téléphone peut bouger.'
@@ -210,6 +272,12 @@ function refreshPanel() {
       const cls = !r.frames ? 'dim' : r.fullPct >= 90 ? 'ok' : r.max >= exp ? 'warn' : 'bad';
       return `<tr class="${cls}"><td>${r.label}</td><td>${r.frames}</td><td>${r.frames ? `${fmt(r.mean, 1)} · ${r.max}` : '–'}</td><td>${r.frames ? fmt(r.fullPct, 0, ' %') : '–'}</td></tr>`;
     }).join('');
+  const mr = currentMotion();
+  $('motionNow').textContent = Number.isFinite(mr) ? `Téléphone : ${mr < 5 ? 'immobile' : mr < 30 ? 'bouge doucement' : 'bouge vite'} (${fmt(mr, 0)} °/s)` : 'Téléphone : mouvement non lu par ce navigateur';
+  $('motionTable').innerHTML = '<tr class="dim"><td>mouvement</td><td>images</td><td>complètes</td></tr>' + motionStats.map((r, i) => {
+    const pct = r.frames ? (100 * r.full) / r.frames : NaN;
+    return `<tr class="${!r.frames ? 'dim' : pct >= 90 ? 'ok' : pct >= 60 ? 'warn' : 'bad'}"><td>${MOTION_LABELS[i]}</td><td>${r.frames}</td><td>${r.frames ? fmt(pct, 0, ' %') : '–'}</td></tr>`;
+  }).join('');
 
   const fin = cameraFps(), fout = win.rateOut.perSecond;
   const tot = win.read.mean + win.find.mean;
@@ -252,9 +320,10 @@ function report() {
     `caméra: ${state.cam ? `${state.cam.label} ${state.cam.settings.width}x${state.cam.settings.height} @${state.cam.settings.frameRate ?? '?'}` : 'non démarrée'}${state.demo ? ' (SCÈNE SIMULÉE)' : ''}`,
     `requestVideoFrameCallback: ${typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype ? 'oui' : 'non'}`,
     `Web Bluetooth: ${'bluetooth' in navigator ? 'oui' : 'non'}`,
-    `détection: ${state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
+    `détection: ${state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${lineOn() && squareOn() ? ' en alternance' : ''}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'}/${pdiffAmber.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
+    `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
     `images reçues/s: ${fmt(cameraFps(), 1)}  analysées/s: ${fmt(win.rateOut.perSecond, 1)}  par période de clignotement: ${fmt((win.rateOut.perSecond * 2 * state.halfMs) / 1000, 1)}`,
     `retard caméra→page: ${latency.count ? `${fmt(latency.mean, 0)} ms (${win.latencyKind})` : 'n/d'}`,
     `lecture de l'image: moy ${fmt(read.mean, 1)} max ${fmt(read.max, 1)} ms`,
@@ -264,6 +333,9 @@ function report() {
     `angle de vue maintenant: ${Number.isFinite(currentAngle()) ? `${Math.round(currentAngle())}°` : 'n/d'} (capteur d'orientation ${state.cam?.angle ? 'simulé' : sensor.seen ? 'lu' : 'non lu'})`,
     `points selon l'angle de vue (images · points moyen · max · % d'images avec les ${expected()}):`,
     ...angles.summary().map((r) => `  ${r.label}: ${r.frames} · ${fmt(r.mean, 1)} · ${r.frames ? r.max : 'n/d'} · ${fmt(r.fullPct, 0, ' %')}`),
+    `mouvement du téléphone maintenant: ${Number.isFinite(currentMotion()) ? `${fmt(currentMotion(), 0)} °/s` : 'non lu'} (${state.cam?.motion ? 'simulé' : motion.seen ? 'gyroscope lu' : 'non lu'})`,
+    'images complètes selon le mouvement du téléphone (images · % avec tous les points):',
+    ...motionStats.map((r, i) => `  ${MOTION_LABELS[i]}: ${r.frames} · ${r.frames ? fmt((100 * r.full) / r.frames, 0, ' %') : 'n/d'}`),
     `plus clair: ${win.last.brightest}`,
     `exposition: ${exposureText()}`,
     `robot: ${robot.text}${robot.on ? ` (LED ${robot.mode})` : ''}`,
@@ -292,7 +364,7 @@ async function start(kind) {
     if (!state.demo) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
     const cam = state.demo
-      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), halfMs: () => state.halfMs, group: () => state.group })
+      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     resetWindows();
@@ -351,11 +423,11 @@ async function toggleExposure() {
 // The script on the robot (py/leds_lego.py) has three modes for the 16 top LEDs: blinking (what the blink detection
 // looks for), on, off. Changing the mode while it runs sends the script again.
 const robot = { api: null, on: false, mode: null, busy: false, text: 'non connecté' };
-const groupText = (g) => (g < 0 ? 'les 16 LED' : `4 LED alignées (rangée ${g < 2 ? 'avant' : 'arrière'}, une sur deux, ${g % 2 ? 'B' : 'A'})`);
+const groupText = (g, c = -1) => [g === -2 ? '' : g < 0 ? 'les 16 LED' : `4 LED alignées (rangée ${g < 2 ? 'avant' : 'arrière'}, une sur deux, ${g % 2 ? 'B' : 'A'})`, c < 0 ? '' : `4 arcs du cercle (${c === 0 ? 'N, E, S, W' : 'NE, SE, SW, NW'})`].filter(Boolean).join(g !== -2 && c >= 0 ? ' et ' : '') || 'aucune LED du dessus';
 const robotNote = (text, cls = 'dim') => { $('robotNote').textContent = text; $('robotNote').className = `note ${cls}`; robot.text = text; };
-const modeNote = (mode, g, halfMs) => ({
-  blink: `Script lancé : ${groupText(g)} clignotent (${hzOf(halfMs).toFixed(1)} Hz : ${halfMs} ms allumées, ${halfMs} ms éteintes), les autres du dessus restent éteintes.`,
-  on: `Script lancé : ${groupText(g)} allumées en continu (niveau 16, sans scintillement).`,
+const modeNote = (mode, g, c, halfMs) => ({
+  blink: `Script lancé : ${groupText(g, c)} ${g !== -2 && c >= 0 ? 'clignotent à tour de rôle' : 'clignotent'} (${hzOf(halfMs).toFixed(1)} Hz : ${halfMs} ms allumées, ${halfMs} ms éteintes), les autres du dessus restent éteintes.`,
+  on: `Script lancé : ${groupText(g, c)} allumées en continu (niveau 16, sans scintillement).`,
   off: 'Script lancé : les 16 LED du dessus sont éteintes (les autres LED du robot ne changent pas).',
 })[mode];
 const bluetoothOk = () => 'bluetooth' in navigator;
@@ -371,14 +443,15 @@ async function launchRobot() {
   await api.stopScriptExecution();
   await sleep(60);
   robotNote('Envoi du script au robot…');
-  await api.sendPythonScript(buildScript(ledsLegoScript, mode, state.halfMs, state.group));
+  await api.sendPythonScript(buildScript(ledsLegoScript, mode, state.halfMs, state.group, state.circle));
   await api.executeLoadedScript();
   robot.on = true;
   robot.mode = mode;
   robot.group = state.group;
+  robot.circle = state.circle;
   $('robot').textContent = 'Rendre la main au robot (arrêter le script)';
   $('robot').classList.add('on');
-  robotNote(modeNote(mode, state.group, state.halfMs), 'ok');
+  robotNote(modeNote(mode, state.group, state.circle, state.halfMs), 'ok');
 }
 
 async function toggleRobot() {
@@ -429,11 +502,14 @@ function applyBlink() {
   lock.reset();
   pdiff.halfMs = state.halfMs;
   pdiff.reset();
+  pdiffAmber.halfMs = state.halfMs;
+  pdiffAmber.reset();
   resetWindows();
   resetAngles();
 }
 $('ledMode').onchange = (e) => { state.ledMode = e.target.value; resendRobot(); };
 $('ledGroup').onchange = (e) => { state.group = Number(e.target.value); applyBlink(); resendRobot(); };
+$('circleSet').onchange = (e) => { state.circle = Number(e.target.value); applyBlink(); resendRobot(); };
 $('blinkSpeed').onchange = (e) => { state.halfMs = Number(e.target.value); applyBlink(); resendRobot(); };
 $('detect').onchange = (e) => { setDetect(e.target.value); };
 $('signal').onchange = (e) => { state.signal = e.target.value; resetWindows(); resetAngles(); };
@@ -461,16 +537,19 @@ function setDetect(mode) {
   $('signal').value = state.signal;
   lock.reset();
   pdiff.reset();
+  pdiffAmber.reset();
   resetWindows();
   resetAngles();
   for (const el of document.querySelectorAll('[data-for]')) el.style.display = el.dataset.for.split(' ').includes(mode) ? '' : 'none';
 }
 $('ledGroup').value = String(state.group);
+$('circleSet').value = String(state.circle);
 $('blinkSpeed').value = String(state.halfMs);
 $('procSize').value = String(state.procSize);
 lock.hz = blinkHz();
 lock.windowMs = windowOf(state.halfMs);
 pdiff.halfMs = state.halfMs;
+pdiffAmber.halfMs = state.halfMs;
 setDetect(state.detect);
 
 if (!('bluetooth' in navigator)) robotNote('Pas de Web Bluetooth dans ce navigateur (sur iPad : Bluefy). La caméra se teste quand même, avec les LED allumées autrement.');

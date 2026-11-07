@@ -7,13 +7,14 @@
 // together. It does not know how much light an LED gives out sideways (it draws every LED as bright from
 // every side): that is what the test on a real robot is for.
 //
-// `?demo&elev=30` holds the view at 30° instead of swinging. `&blink` makes the 16 LEDs blink as the robot's script
+// `?demo&elev=30` holds the view at 30° instead of swinging. The page tells it which LEDs the robot is asked to light
+// (the 16 green Lego LEDs, 4 aligned ones, the amber arcs of the ring, or the row and the ring in turn). `&blink` makes the 16 LEDs blink as the robot's script
 // does; `&extra` adds steady lights of other colours (a blue one, a red glow, a ring of amber ones), as on the real
 // robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles; `&sway=40` swings it 40 px
 // each way at 0.6 Hz (a peak speed of 150 px a second: a phone carried in the hand).
 
 import { fromStream } from './camera.js';
-import { HALF_MS, groupMembers } from './script.js';
+import { HALF_MS, groupMembers, circleMembers, isAlternating } from './script.js';
 
 export const DEMO_W = 1280;
 export const DEMO_H = 720;
@@ -62,7 +63,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -72,7 +73,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
   const pad = circle(24, 0, 26);               // the touch pad, near the nose (y_svg = -26)
   const leds = ledPositions();
   const HEIGHT = 50;                           // mm, the body under the top face
-  const view = { elev: 90 };
+  const view = { elev: 90, motion: 0 };
 
   const poly = (pts, fill) => {
     g.beginPath();
@@ -103,6 +104,9 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     g.fillRect(0, 0, DEMO_W, DEMO_H);
     g.save();
     if (shake) g.translate(Math.round((Math.random() - 0.5) * 2 * shake), Math.round((Math.random() - 0.5) * 2 * shake));
+    // how fast the picture moves, as a phone's gyroscope would say it (deg/s): the speed of the sway and of the shake over the focal length
+    const w = 2 * Math.PI * 0.6, vx = sway * w * Math.cos(w * t), vy = 0.5 * sway * w * Math.cos(w * t + 1);
+    view.motion = ((Math.hypot(vx, vy) + shake * 24) / FOCAL) * (180 / Math.PI);
     if (sway) g.translate(sway * Math.sin(2 * Math.PI * 0.6 * t), 0.5 * sway * Math.sin(2 * Math.PI * 0.6 * t + 1));       // the phone swaying in the hand: `sway` px each way, at 0.6 Hz
     // the sides of the body that face the camera
     for (let i = 0; i < body.length; i++) {
@@ -115,19 +119,34 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     }
     poly(body.map((p) => project(cam, p)), '#d9dde3');
     poly(pad.map((p) => project(cam, p)), '#b8bec8');
-    // the 16 LEDs: green with a white-hot core, about 5 mm across, as seen from every side, steady or blinking
-    const lit = !blink || Math.floor((t * 1000) / halfMs()) % 2 === 0;
-    // the LEDs of the group the page asked the (simulated) robot for: leds[] is the front row (0..7) and then the back row
-    const driven = new Set(groupMembers(group()).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
-    if (lit) for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
+    // the LEDs the page asked the (simulated) robot for. The Lego LEDs (16 green, with a white-hot core, about 5 mm across):
+    // leds[] is the front row (0..7) and then the back row. The ring arcs (amber, 34 degrees long, 3 mm thick, radius 26 mm
+    // round the pad). With both asked for they blink in turn (leds_lego.py): the row while the ring is off and the other way round.
+    const on = !blink || Math.floor((t * 1000) / halfMs()) % 2 === 0;
+    const gp = group(), cc = ringSet(), alt = isAlternating(gp, cc);
+    const legoLit = gp !== -2 && (!blink || on), ringLit = cc >= 0 && (!blink || (alt ? !on : on));
+    const driven = new Set(groupMembers(gp).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
+    if (legoLit) for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']);
+    if (ringLit) {
+      g.lineCap = 'round';
+      for (const m of circleMembers(cc)) {
+        const pts = [];
+        for (let a = -17; a <= 17; a += 34 / 8) { const th = (m.i * 45 + a) * DEG; pts.push(project(cam, [26 * Math.sin(th), 26 + 26 * Math.cos(th), 0])); }
+        for (const [mm, colour] of [[3.4, 'rgb(255,185,25)'], [1.3, 'rgb(255,235,160)']]) {
+          g.lineWidth = Math.max(1.5, (mm * FOCAL) / pts[4].z);
+          g.strokeStyle = colour;
+          g.beginPath();
+          pts.forEach((q, i) => (i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y)));
+          g.stroke();
+        }
+      }
+    }
     if (extra) {
-      // steady lights that are not the 16: a blue one at the front, a red glow low at the back, the ring round the pad
+      // steady lights that are not the ones asked for: a blue one at the front, a red glow low at each side of the back, an
+      // amber light on the table (a lamp, an orange object)
       glow(project(cam, [0, 54, 0]), 3.5, ['rgb(255,255,255)', 'rgb(120,170,255)', 'rgb(40,80,255)', 'rgba(30,60,255,0)']);
       for (const x of [-45, 45]) glow(project(cam, [x, -50, -HEIGHT]), 6, ['rgb(255,200,180)', 'rgb(255,80,40)', 'rgb(255,40,20)', 'rgba(255,30,10,0)']);
-      for (let i = 0; i < 8; i++) {
-        const a = (i * Math.PI) / 4;
-        glow(project(cam, [24 * Math.cos(a), 26 + 24 * Math.sin(a), 0]), 2.2, ['rgb(255,240,160)', 'rgb(255,200,40)', 'rgb(255,170,20)', 'rgba(255,150,0,0)']);
-      }
+      glow(project(cam, [80, 25, -HEIGHT]), 5, ['rgb(255,235,160)', 'rgb(255,190,40)', 'rgb(255,170,20)', 'rgba(255,150,0,0)']);
     }
     g.restore();
   };
@@ -135,6 +154,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
   const timer = setInterval(draw, 1000 / 30);
   const stream = canvas.captureStream(30);
   const cam = await fromStream(stream, { label: 'scène simulée', stopExtra: () => clearInterval(timer) });
-  cam.angle = () => view.elev;                 // the page reads the angle here instead of the orientation sensor
+  cam.angle = () => view.elev;
+  cam.motion = () => view.motion;              // the page reads the movement here instead of the motion sensor                 // the page reads the angle here instead of the orientation sensor
   return cam;
 }

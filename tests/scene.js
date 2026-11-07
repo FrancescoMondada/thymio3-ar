@@ -13,7 +13,7 @@ export const EXTRA = [
 
 export function rng(seed) { let s = seed; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; }; }
 
-export function frame({ on, extra = true, noise = 6, dx = 0, dy = 0, rnd }) {
+export function frame({ on, extra = true, noise = 6, dx = 0, dy = 0, rnd, leds = LEDS }) {
   const rgba = new Uint8ClampedArray(W * H * 4);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
@@ -38,7 +38,7 @@ export function frame({ on, extra = true, noise = 6, dx = 0, dy = 0, rnd }) {
       }
     }
   };
-  if (on) LEDS.forEach(spot);
+  if (on) leds.forEach(spot);
   if (extra) EXTRA.forEach(spot);
   return rgba;
 }
