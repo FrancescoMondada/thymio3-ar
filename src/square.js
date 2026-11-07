@@ -102,3 +102,42 @@ function evaluate(pts, { minSide, maxOpposite, maxDiagonal, maxSideRatio, minAre
   }
   return { chosen: P, sides, vanishing, centre: { x: cx, y: cy }, score };
 }
+
+// Three of the four corners found: where is the fourth? The corners of a square seen in perspective are the corners of a quadrilateral whose
+// diagonals cross near their middles, so for three consecutive corners A, B, C (B the middle one) the fourth is about A + C - B (exact without
+// perspective, a tenth of a side off at 45 degrees). Which of the three is the middle one is not known: each gives a hypothesis (sides at least
+// `minSide`, the two sides within `maxSideRatio` (3.5: seen from 20 degrees the sides of a square differ by up to 2.9), the angle at B between 25 and 155 degrees),
+// the likeliest first (equal sides, a right angle). The best triple is the strongest, of arcs of about the same strength and size.
+// -> { chosen: [3 spots], hypotheses: [{ predicted: { x, y }, side, score }, ...], predicted, side } (predicted and side: the first hypothesis) or null
+export function completeSquare(spots, { maxCandidates = 12, minSide = 6, maxSideRatio = 3.5, maxSizeRatio = 4, minAngleDeg = 25, maxAngleDeg = 155 } = {}) {
+  const cand = spots.slice().sort((a, b) => (b.weight ?? b.area ?? 1) - (a.weight ?? a.area ?? 1)).slice(0, maxCandidates);
+  const m = cand.length;
+  let best = null;
+  const cosMin = Math.cos((maxAngleDeg * Math.PI) / 180), cosMax = Math.cos((minAngleDeg * Math.PI) / 180);
+  for (let i = 0; i < m; i++) for (let j = i + 1; j < m; j++) for (let k = j + 1; k < m; k++) {
+    const trio = [cand[i], cand[j], cand[k]];
+    const areas = trio.map((p) => p.area ?? 1);
+    const sizeRatio = Math.max(...areas) / Math.max(1, Math.min(...areas));
+    if (sizeRatio > maxSizeRatio) continue;
+    const ws = trio.map((p) => p.weight ?? p.area ?? 1), weight = ws.reduce((a, b) => a + b, 0);
+    const evenness = Math.sqrt(Math.min(...ws) / Math.max(...ws));              // a weak spot among strong ones is not one of the arcs
+    const hyp = [];
+    for (let b = 0; b < 3; b++) {
+      const B = trio[b], A = trio[(b + 1) % 3], C = trio[(b + 2) % 3];
+      const ab = { x: A.x - B.x, y: A.y - B.y }, cb = { x: C.x - B.x, y: C.y - B.y };
+      const la = Math.hypot(ab.x, ab.y), lc = Math.hypot(cb.x, cb.y);
+      if (la < minSide || lc < minSide) continue;
+      const ratio = Math.max(la, lc) / Math.min(la, lc);
+      if (ratio > maxSideRatio) continue;
+      const cos = (ab.x * cb.x + ab.y * cb.y) / (la * lc);
+      if (cos < cosMin || cos > cosMax) continue;
+      const shape = (1 - 0.4 * (ratio - 1) / (maxSideRatio - 1)) * (1 - 0.4 * Math.abs(cos) / Math.max(Math.abs(cosMin), Math.abs(cosMax)));
+      hyp.push({ predicted: { x: A.x + C.x - B.x, y: A.y + C.y - B.y }, side: (la + lc) / 2, score: shape });
+    }
+    if (!hyp.length) continue;
+    hyp.sort((p, q) => q.score - p.score);
+    const score = weight * evenness * hyp[0].score * (1 - 0.3 * (sizeRatio - 1) / (maxSizeRatio - 1));
+    if (!best || score > best.score) best = { chosen: trio, hypotheses: hyp, predicted: hyp[0].predicted, side: hyp[0].side, score };
+  }
+  return best;
+}

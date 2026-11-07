@@ -105,3 +105,41 @@ test('speed with 16 candidates (reported, loosely bounded)', () => {
   console.log(`  square filter, 40 spots (16 tried): ${ms.toFixed(2)} ms`);
   assert.ok(ms < 50);
 });
+
+// ---- three of the four corners found -------------------------------------------------------------------------------------
+import { completeSquare } from '../src/square.js';
+import { discWindow } from '../src/layout.js';
+
+test('with 3 of the 4 arcs found, one of the hypotheses puts the fourth within a third of a side of where it is, from any side and height', () => {
+  const rnd = rng(21);
+  let first = 0;
+  for (let trial = 0; trial < 300; trial++) {
+    const v = view(20 + rnd() * 70, rnd() * 360, rnd, 0.5);
+    const four = v.ring([1, 3, 5, 7]);
+    const missing = trial % 4, three = four.filter((_, i) => i !== missing);
+    const noise = Array.from({ length: 6 }, () => ({ x: 100 + rnd() * 1000, y: 60 + rnd() * 600, weight: 30 + rnd() * 60, area: 30 }));
+    const r = completeSquare([...noise, ...three]);
+    assert.ok(r, `trial ${trial}`);
+    assert.ok(three.every((p) => r.chosen.includes(p)), `trial ${trial}: the three that were found`);
+    const errs = r.hypotheses.map((h) => Math.hypot(h.predicted.x - four[missing].x, h.predicted.y - four[missing].y) / h.side);
+    assert.ok(Math.min(...errs) < 0.35, `trial ${trial}: hypotheses ${errs.map((e) => e.toFixed(2)).join(', ')} sides away`);
+    if (errs[0] < 0.35) first++;
+  }
+  assert.ok(first >= 250, `the likeliest hypothesis is the right one in ${first} of 300 (the page tries them all)`);
+});
+
+test('three spots that are not three corners of a square give nothing: in a row, a very flat angle, two sides of very different length, blobs of different sizes', () => {
+  const p = (x, y, a = 40) => ({ x, y, weight: 100, area: a });
+  assert.equal(completeSquare([p(100, 100), p(200, 102), p(300, 99)]), null, 'in a row');
+  assert.equal(completeSquare([p(100, 100), p(200, 100), p(110, 120)]), null, 'a sharp angle');
+  assert.equal(completeSquare([p(100, 100), p(110, 100), p(110, 330)]), null, 'one side 23 times the other');
+  assert.equal(completeSquare([p(100, 100, 10), p(200, 100, 400), p(200, 200, 10)]), null, 'one blob 40 times the others');
+  assert.equal(completeSquare([p(100, 100), p(200, 100)]), null, 'two spots');
+});
+
+test('the disc window is where the missing corner is expected: inside, box and outline', () => {
+  const w = discWindow({ x: 50, y: 60 }, 10);
+  assert.ok(w.inside({ x: 55, y: 64 }));
+  assert.ok(!w.inside({ x: 70, y: 60 }));
+  assert.deepEqual([w.bbox.x0, w.bbox.y0, w.bbox.x1, w.bbox.y1].map(Math.round), [40, 50, 60, 70]);
+});

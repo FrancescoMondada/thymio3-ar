@@ -13,12 +13,13 @@
 // one set gives the scale, the windows carry minimum sizes proportional to it (a fifth of a side of the square, a quarter of the
 // gap between LEDs). The scales of the two sets are compared (same plane, same camera) and reported.
 import { pickAligned } from './aligned.js';
-import { pickSquare } from './square.js';
-import { ringWindowFromRow, rowWindowFromRing, rowScale, ringMeanScale, scalesAgree } from './layout.js';
+import { pickSquare, completeSquare } from './square.js';
+import { ringWindowFromRow, rowWindowFromRing, rowScale, ringMeanScale, scalesAgree, discWindow } from './layout.js';
 
 // line, ring: the candidate spots of each set. group: 0..3 (four aligned LEDs of a row), -1 (the 16: no filter), -2 (none).
 // -> { aligned, square, window, predicted, rescued, scales, mismatch }
-//    predicted: null | 'ring-from-row' | 'row-from-ring' | 'both'; rescued: false | 'gate' | 'retry'
+//    predicted: null | 'ring-from-row' | 'row-from-ring' | 'both'; rescued: false | 'gate' | 'retry' | 'complete'
+//    (square.partial: only 3 arcs were found; square.predicted is where the fourth is expected)
 export function locate({ line = [], ring = [], group = 0, wantLine = true, wantRing = true, elevDeg = NaN, longSide = 480, retryLine = null, retryRing = null, gate = true, rowOpts = {}, ringOpts = {} }) {
   const baseGap = Math.max(3, 0.007 * longSide), baseSide = Math.max(5, 0.012 * longSide);
   const useRow = wantLine && group >= 0;
@@ -71,6 +72,24 @@ export function locate({ line = [], ring = [], group = 0, wantLine = true, wantR
         if (best) { aligned = best.aligned; square = best.square; rescued = 'gate'; }
         else mismatch = true;                                          // both were found, and they do not belong together
       }
+    }
+  }
+
+  // three of the four arcs found: the fourth is about A + C - B; look for it there, with a lower threshold than elsewhere, and only there
+  if (wantRing && !ringOk()) {
+    const pool = window && window.kind === 'ring-from-row' ? ring.filter(window.inside) : ring;
+    const part = completeSquare(pool, { minSide: window?.minSide ?? baseSide });
+    if (part) {
+      outer: for (const h of part.hypotheses) {                       // which of the three is the middle corner is not known: try each
+        const near = discWindow(h.predicted, 0.4 * h.side);
+        const known = pool.filter((p) => !part.chosen.includes(p) && near.inside(p));
+        const tries = known.length ? known : (retryRing ? retryRing(near).filter((p) => !part.chosen.includes(p)) : []);
+        for (const extra of tries.sort((a, b) => (b.weight ?? 1) - (a.weight ?? 1))) {
+          const sq = pickSquare([...part.chosen, extra], { minSide: window?.minSide ?? baseSide, ...ringOpts });
+          if (sq.full) { square = sq; rescued = 'complete'; if (!predicted) predicted = 'ring-from-arcs'; break outer; }
+        }
+      }
+      if (!ringOk()) square = { chosen: part.chosen, full: false, partial: true, predicted: part.predicted };
     }
   }
 

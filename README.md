@@ -157,6 +157,23 @@ l'écart entre LED (px) dans la chronologie ; **taille d'analyse automatique** (
 essayée). Test synthétique : sans flou, la détection tient jusqu'à 6 px entre deux LED (100 %), tombe à 5 px ; le flou et la réduction d'une vraie
 caméra la font tomber plus tôt, d'où la taille automatique.
 
+**Septième essai** (2026-11-07 13h40, version 7e113e6 : réglages par défaut, taille automatique, 142 s, 1576 images, aucune exposition changée) :
+rangée 80 %, arcs 48 %, les deux 48 %, 43 % sauvées par la prédiction (essai précédent : 46 %). Chronologie : 0–10 s rien (la taille passe de 480 à 640 puis
+960 : la page cherchait une échelle) ; 10–20 s rangée 1 %, LED à 7 px à 960 (très loin) ; **dès 20 s** rangée 91 à 100 % et les deux entre 45 et 90 %
+(79, 90, 64, 56, 50, 50, 46, 45, **0** [arcs à 60 de réponse seulement], 70, 84, 83, 23). Selon l'angle : 57 % d'images complètes à 75–90°, 52 % à 60–75°,
+**31 % à 45–60°** ; immobile 46 %, lent 48 %, rapide 36 %. La taille est restée à **960** pendant deux minutes (écart de 15 à 33 px à 960, soit 10 à 22 px à
+480) : 11,9 images analysées par seconde, 4,7 par période (sous le minimum de 5), recherche 37 ms, parce que la règle ne redescendait qu'au-delà de 42 px.
+L'utilisateur a vu, sur l'écran, que **la zone de recherche des arcs, centrée sur les 4 LED de la rangée, exclut parfois un arc**. Mesure en simulation :
+quand le téléphone croit viser plus haut que la réalité (l'axe de la caméra n'est pas la direction vers le robot, qui est plus bas quand il est en haut
+de l'image : 25 à 40° d'écart), l'ancienne zone laissait un arc dehors dans 1 % (erreur 25°) à 8 % (erreur 40°, caméra le long de la rangée, comme sur la
+capture) des cas ; avec une marge de 30° sur l'inclinaison, 60 mm de chaque côté du milieu de la rangée et un facteur 1,2, aucun. La zone couvre alors
+24 à 34 % d'une image portrait à partir de 50° de hauteur et près de 70 % en dessous de 50° (là, elle ne filtre presque plus, mais la géométrie ne
+contraint pas davantage). Sur la capture, 4 candidats ambre faisaient un quadrilatère rejeté (côtés 31 et 65 px, rapport 2,1 > 2) pendant que l'arc en
+bas à gauche, bien allumé, manquait : c'est le cas où **3 arcs sur 4 sont trouvés**. Nouveau : le **4ᵉ arc est prédit** à A + C − B d'après trois coins
+consécutifs (on ne sait pas lequel des trois est le coin du milieu : chaque hypothèse est essayée), et cherché **là seulement**, dans un disque, avec un
+seuil plus bas ; le carré à 3 arcs est compté 3 sur 4 et le 4ᵉ attendu est dessiné en pointillés (`&arcdim=3&dimgain=0.3` dans la simulation). La règle de
+taille automatique redescend maintenant quand l'écart resterait d'au moins 15 px à la taille inférieure.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les

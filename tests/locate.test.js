@@ -135,3 +135,42 @@ test('the window look: only inside the window, and with a lower threshold than t
   assert.ok(DIAG.every((i) => { const c = sc.arcCentre(i); return inWin.spots.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < 8 * sc.s); }), 'the 4 arcs');
   assert.ok(inWin.spots.every((p) => win.inside(p)), 'and nothing outside the window');
 });
+
+// ---- three arcs found, the fourth expected where the parallelogram puts it ------------------------------------------------------
+test('three arcs found and the fourth missing at the usual threshold: it is looked for where A + C - B puts it, with a lower threshold, and only there', () => {
+  const sc = world({ s: 2.6 });
+  const row = FRONT_A.map(([r, k]) => spot(sc.ledPoint(r, k), 100, 20));
+  const arcs = DIAG.map((i) => spot(sc.arcCentre(i), 100, 400));
+  for (const missing of [0, 1, 2, 3]) {
+    const three = arcs.filter((_, i) => i !== missing);
+    const asked = [];
+    const retryRing = (win) => { asked.push(win); return win.inside(arcs[missing]) ? [{ ...arcs[missing], weight: 30 }] : []; };
+    const r = locate({ line: row, ring: three, group: 0, elevDeg: 90, retryRing });
+    assert.ok(r.square.full, `arc ${missing} missing`);
+    assert.equal(r.rescued, 'complete');
+    assert.ok(arcs.every((a) => r.square.chosen.some((p) => p.x === a.x && p.y === a.y)));
+    assert.ok(asked.every((w) => w.kind === 'disc' || w.kind === 'ring-from-row'), 'the look was in a window');
+    assert.ok(asked.length >= 1);
+  }
+});
+
+test('three arcs and no fourth anywhere: the square is reported as partial, with where the fourth is expected', () => {
+  const sc = world({ s: 2.6 });
+  const row = FRONT_A.map(([r, k]) => spot(sc.ledPoint(r, k), 100, 20));
+  const arcs = DIAG.map((i) => spot(sc.arcCentre(i), 100, 400));
+  const r = locate({ line: row, ring: arcs.slice(0, 3), group: 0, elevDeg: 90, retryRing: () => [] });
+  assert.equal(r.square.full, false);
+  assert.equal(r.square.partial, true);
+  assert.equal(r.square.chosen.length, 3);
+  const dist = Math.hypot(r.square.predicted.x - arcs[3].x, r.square.predicted.y - arcs[3].y);
+  assert.ok(dist < 0.2 * 36.8 * 2.6, `the predicted fourth is ${dist.toFixed(1)} px from the missing arc (top-down, no perspective: it should be on it)`);
+});
+
+test('a stray spot where the fourth arc is expected, but not a corner of a square, is not taken for it', () => {
+  const sc = world({ s: 2.6 });
+  const row = FRONT_A.map(([r, k]) => spot(sc.ledPoint(r, k), 100, 20));
+  const arcs = DIAG.map((i) => spot(sc.arcCentre(i), 100, 400));
+  const stray = spot({ x: arcs[3].x + 70, y: arcs[3].y + 70 }, 100, 400);                    // far from every hypothesis
+  const r = locate({ line: row, ring: [...arcs.slice(0, 3), stray], group: 0, elevDeg: 90, retryRing: () => [] });
+  assert.equal(r.square.full, false);
+});

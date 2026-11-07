@@ -63,7 +63,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -132,6 +132,7 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
       g.globalAlpha = ringGain;                 // 1: bright arcs; 0.3: faint ones (to try the look in the window with a lower threshold)
       g.lineCap = 'round';
       for (const m of circleMembers(cc)) {
+        g.globalAlpha = m.i === dimArc ? dimGain : ringGain;              // `&arcdim=3&dimgain=0.3`: one arc faint (the fourth of a square of which three are seen)
         const pts = [];
         for (let a = -17; a <= 17; a += 34 / 8) { const th = (m.i * 45 + a) * DEG; pts.push(project(cam, [26 * Math.sin(th), 26 + 26 * Math.cos(th), 0])); }
         for (const [mm, colour] of [[3.4, 'rgb(255,185,25)'], [1.3, 'rgb(255,235,160)']]) {

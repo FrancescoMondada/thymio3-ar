@@ -81,7 +81,7 @@ test('from the ring, every LED of the 4 groups is inside the window', () => {
   }
 });
 
-test('the windows are not everywhere when the camera is well above the table (from 50 degrees): a spot anywhere in the picture is accepted far less often than a true one', () => {
+test('the windows are not everywhere when the camera is well above the table (from 50 degrees): a spot anywhere in the picture is accepted less often than a true one (the row window was widened after the 7th phone test: a margin of 30 degrees on the tilt)', () => {
   const rnd = rng(9);
   let fromRow = 0, fromRing = 0, n = 0;
   for (let trial = 0; trial < 200; trial++) {
@@ -92,7 +92,7 @@ test('the windows are not everywhere when the camera is well above the table (fr
       n++; if (wr.inside(p)) fromRow++; if (wq.inside(p)) fromRing++;
     }
   }
-  assert.ok(fromRow / n < 0.45, `from the row: ${(100 * fromRow / n).toFixed(0)} % of random spots accepted`);
+  assert.ok(fromRow / n < 0.6, `from the row: ${(100 * fromRow / n).toFixed(0)} % of random spots accepted`);
   assert.ok(fromRing / n < 0.3, `from the ring: ${(100 * fromRing / n).toFixed(0)} % of random spots accepted`);
 });
 

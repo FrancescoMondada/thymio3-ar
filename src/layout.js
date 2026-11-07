@@ -56,11 +56,13 @@ export function ringMeanScale(corners) {
 // The scale measured along the row is exact only if the camera looks across the row: looking along it, the gaps are squashed by
 // sin(elevation), while the distances across the row are not. So a distance across the row, counted in "row millimetres" (pixels over
 // the scale of the row), can be up to 1 / sin(elevation) times the true one. `elevDeg` is the angle of the line of sight over the table
-// (the phone's tilt: the page has it); it is not exact (the robot is not always in the middle of the picture), so 12 degrees are taken off
-// it, and with no elevation at all 15 degrees are assumed. The window is a capsule round the row: within D of the segment
-// that goes 38 mm either side of its middle, D = 1.1 x 59 mm / sin(elevation) + 6 mm (59 mm: the farthest the ring reaches
+// (the phone's tilt: the page has it); it is the tilt of the camera AXIS, not of the line of sight to the robot, which is lower when the
+// robot is in the upper part of the picture (up to 25 to 40 degrees in a portrait picture): with 12 degrees taken off, the window left an arc
+// out in 1 to 8 % of simulated views (worst when the camera looks along the row, as in the user's screenshot), with 30 degrees, in none (but
+// it covers 26 to 37 % of the picture instead of 14 to 19). With no elevation at all 15 degrees are assumed. The window is a capsule round the
+// row: within D of the segment that goes 60 mm either side of its middle, D = 1.2 x 59 mm / sin(elevation) + 6 mm (59 mm: the farthest the ring reaches
 // from the front row, 41 + 26 mm for the back one: 67, so the larger is used). Which side is the nose is not known from the row alone: both are allowed.
-export function ringWindowFromRow(row, group, { elevDeg = NaN, halfAlongMm = 38 } = {}) {
+export function ringWindowFromRow(row, group, { elevDeg = NaN, halfAlongMm = 60, elevMarginDeg = 30, k = 1.2 } = {}) {
   const s = rowScale(row);
   if (!(s > 0)) return null;
   const m = { x: row.reduce((a, p) => a + p.x, 0) / row.length, y: row.reduce((a, p) => a + p.y, 0) / row.length };
@@ -68,9 +70,9 @@ export function ringWindowFromRow(row, group, { elevDeg = NaN, halfAlongMm = 38 
   const len = dist(first, last);
   if (len < 1e-6) return null;
   const u = { x: (last.x - first.x) / len, y: (last.y - first.y) / len }, n = { x: -u.y, y: u.x };
-  const eLo = Number.isFinite(elevDeg) ? Math.min(90, Math.max(12, elevDeg - 12)) : 15;
+  const eLo = Number.isFinite(elevDeg) ? Math.min(90, Math.max(10, elevDeg - elevMarginDeg)) : 15;
   const farthest = ringDistance(group) + RING.r;                       // 59 mm (front row), 67 mm (back row)
-  const D = (1.1 * farthest) / Math.sin((eLo * Math.PI) / 180) + 6;    // row mm
+  const D = (k * farthest) / Math.sin((eLo * Math.PI) / 180) + 6;    // row mm
   const A = { x: m.x - u.x * halfAlongMm * s, y: m.y - u.y * halfAlongMm * s }, B = { x: m.x + u.x * halfAlongMm * s, y: m.y + u.y * halfAlongMm * s };
   const Dpx = D * s, abx = B.x - A.x, aby = B.y - A.y, ab2 = abx * abx + aby * aby;
   const inside = (p) => {
@@ -108,4 +110,10 @@ export function scalesAgree(rowS, ringMeanS, { lo = 0.4, hi = 2.5 } = {}) {
   if (!(rowS > 0) || !(ringMeanS > 0)) return null;
   const r = rowS / ringMeanS;
   return { ratio: r, ok: r >= lo && r <= hi };
+}
+
+// a disc window: where a missing corner of the square is expected (same shape as the other windows: inside, bbox, outline)
+export function discWindow(c, radius) {
+  const outline = Array.from({ length: 16 }, (_, i) => ({ x: c.x + radius * Math.cos((i * Math.PI) / 8), y: c.y + radius * Math.sin((i * Math.PI) / 8) }));
+  return { kind: 'disc', s: NaN, inside: (p) => Math.hypot(p.x - c.x, p.y - c.y) <= radius, bbox: boxOf(outline), outline, minSide: 0, minGap: 0 };
 }

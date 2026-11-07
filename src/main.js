@@ -267,6 +267,14 @@ function drawSpots(spots, counted, aligned, square, window) {
     ctx.lineTo(aligned.chosen[aligned.chosen.length - 1].x, aligned.chosen[aligned.chosen.length - 1].y);
     ctx.stroke();
   }
+  if (square && square.partial && square.predicted) {               // 3 arcs found: where the fourth is expected (dashed)
+    ctx.setLineDash([3 * k, 3 * k]);
+    ctx.strokeStyle = 'rgba(255, 180, 84, 0.9)';
+    ctx.beginPath();
+    ctx.arc(square.predicted.x, square.predicted.y, 9 * k, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   if (square && square.chosen.length === 4) {                       // the quadrilateral the arcs make
     ctx.strokeStyle = 'rgba(255, 180, 84, 0.6)';
     ctx.beginPath();
@@ -454,7 +462,7 @@ async function start(kind) {
     if (!state.demo) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
     const cam = state.demo
-      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), ringGain: params.has('ring') ? Number(params.get('ring')) : 1, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
+      ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), ringGain: params.has('ring') ? Number(params.get('ring')) : 1, dimArc: params.has('arcdim') ? Number(params.get('arcdim')) : -1, dimGain: params.has('dimgain') ? Number(params.get('dimgain')) : 0.12, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     timeline.reset();
