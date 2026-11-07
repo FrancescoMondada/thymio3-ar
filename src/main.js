@@ -13,6 +13,7 @@ import { pickAligned } from './aligned.js';
 import { pickSquare } from './square.js';
 import { locate } from './locate.js';
 import { Timeline } from './timeline.js';
+import { nextSize } from './autosize.js';
 import { ROW_GAP } from './layout.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
@@ -32,7 +33,7 @@ const lock = new LockIn({ hz: hzOf(HALF_MS), windowMs: windowOf(HALF_MS), comput
 
 // detect: 'diff' (what turns on or off between two pictures half a period apart: pairdiff.js), 'blink' (what blinks at the
 // robot's rhythm over a second: lockin.js, needs a phone that does not move) or 'bright' (the bright spots of each picture)
-const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, ringThreshold: Number(params.get('ringthr')) || 80, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: 480,
+const state = { cam: null, facing: 'environment', demo: false, detect: ['blink', 'bright'].includes(params.get('detect')) ? params.get('detect') : 'diff', signal: params.get('signal') === 'any' ? 'any' : 'color', ledMode: 'blink', blinkThreshold: 50, ringThreshold: Number(params.get('ringthr')) || 80, threshold: 200, contrast: 20, color: 'all', mask: false, procSize: [320, 480, 640, 960].includes(Number(params.get('size'))) ? Number(params.get('size')) : 480, procAuto: !params.has('size'),
   halfMs: HALF_CHOICES.includes(Number(params.get('half'))) ? Number(params.get('half')) : HALF_MS,        // the LEDs blink this long on, this long off
   group: GROUPS.includes(Number(params.get('group'))) && params.has('group') ? Number(params.get('group')) : 0,    // Lego LEDs: 0..3: 4 aligned on one row, 16 mm apart; -1: the 16; -2: none
   circle: CIRCLES.includes(Number(params.get('circle'))) && params.has('circle') ? Number(params.get('circle')) : 1 };    // ring arcs: 1: NE SE SW NW (a square, sides parallel to the row); 0: N E S W; -1: none. With a group they blink in turn
@@ -198,22 +199,26 @@ function tick(cam, now, meta) {
       const mc = motionClass(currentMotion());
       if (mc >= 0) { motionStats[mc].frames++; if (counted.length === expected()) motionStats[mc].full++; }
     }
+    let sceneScale = NaN;
     if (loc) {
+      const sc0 = loc.scales?.row ?? loc.scales?.ringMean;
+      sceneScale = Number.isFinite(sc0) ? sc0 : NaN;
       const d = win.diag, lineCand = res.spots.filter((sp) => sp.set === 'line').length, ringCand = res.spots.filter((sp) => sp.set === 'ring').length;
       if (lineOn()) { d.rowCand.push(lineCand); d.rowOk.push(alignOn() ? (aligned?.chosen.length >= 3 ? 1 : 0) : lineCand >= 1 ? 1 : 0); d.rowPeak.push(peakLine); }
       if (squareOn()) { d.ringCand.push(ringCand); d.ringOk.push(square?.full ? 1 : 0); d.ringPeak.push(peakRing); }
       timeline.add(now, {
         row: lineOn() ? (alignOn() ? (aligned?.chosen.length ?? 0) >= 3 : lineCand >= 1) : null, ring: squareOn() ? !!square?.full : null,
         rescued: !!loc.rescued, rowPeak: peakLine, ringPeak: peakRing, motion: currentMotion(), seen: Math.max(peakLine, peakRing) >= SEEN_PEAK,
-        cfg: `${state.blinkThreshold}/${state.ringThreshold}/${state.procSize}/${state.group}/${state.circle}/${state.halfMs}`,
+        gap: Number.isFinite(sceneScale) ? ROW_GAP * sceneScale : NaN,
+        cfg: `${state.blinkThreshold}/${state.ringThreshold}/${state.procSize}${state.procAuto ? 'a' : ''}/${state.group}/${state.circle}/${state.halfMs}/${exposureTag()}`,
       });
       d.unseen.push(Math.max(peakLine, peakRing) < SEEN_PEAK ? 1 : 0);
       d.rescued.push(loc.rescued ? 1 : 0);
       d.mismatch.push(loc.mismatch ? 1 : 0);
-      const sc = loc.scales?.row ?? loc.scales?.ringMean;
-      if (Number.isFinite(sc)) d.scale.push(sc);
+      if (Number.isFinite(sceneScale)) d.scale.push(sceneScale);
     }
     win.last = { ...res, spots: counted, found: res.spots, aligned, square, loc };
+    if (loc) maybeAutoSize(now);
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
       if (win.frames.length > 30) win.frames.shift();
@@ -225,6 +230,16 @@ function tick(cam, now, meta) {
 }
 
 // green circle: counted; grey circle: a spot of another colour, not counted
+// the analysis size follows the scale measured (autosize.js): the gap between two LEDs of a group (16 mm), in pixels, at the size in use
+let lastSizeChange = 0;
+function maybeAutoSize(now) {
+  const d = win.diag;
+  if (!state.procAuto || state.detect !== 'diff' || !d || d.unseen.count < 40 || now - lastSizeChange < 6000) return;
+  const found = Math.max(lineOn() && d.rowOk.count ? d.rowOk.mean : 0, squareOn() && d.ringOk.count ? d.ringOk.mean : 0);
+  const size = nextSize({ size: state.procSize, gapPx: d.scale.count ? ROW_GAP * d.scale.mean : NaN, samples: d.scale.count, foundShare: found, unseenShare: d.unseen.mean });
+  if (size !== state.procSize) { state.procSize = size; lastSizeChange = now; }
+}
+
 function drawSpots(spots, counted, aligned, square, window) {
   const k = canvas.width / Math.max(1, canvas.clientWidth);        // canvas pixels per screen pixel
   ctx.lineWidth = 1.5 * k;
@@ -309,6 +324,9 @@ function refreshPanel() {
     dg.unseen.mean > 0.2 ? `Rien ne répond dans ${pct(dg.unseen)} des dernières images : le robot est-il dans l'image ? (ces images comptent comme manquées)` : '',
     dg.mismatch.mean > 0.2 ? 'Les échelles de la rangée et du carré ne s\'accordent pas : l\'un des deux n\'est pas ce qu\'on croit.' : '',
   ].filter(Boolean).join(' ');
+  const ch = changedSettings();
+  $('advancedSummary').textContent = ch.length ? `Réglages avancés : MODIFIÉS (${ch.join(', ')})` : 'Réglages avancés (seuils, taille, détection) : les valeurs par défaut sont faites pour marcher';
+  $('advancedSummary').className = ch.length ? 'warn' : '';
   $('detectNote').textContent = blink && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : cette détection ne verra rien (choisissez « LED clignotantes »).'
     : state.detect === 'bright' && robot.on && robot.mode === 'blink' ? 'Les LED clignotent : la détection par luminosité ne les voit qu\'une image sur deux (choisissez « allumées en continu »).'
     : state.detect === 'diff' ? 'Il faut des LED qui clignotent : le bouton Robot plus bas les fait clignoter. Cette détection compare deux images : le téléphone peut bouger.'
@@ -366,11 +384,11 @@ function timelineLines() {
   const bins = timeline.bins();
   if (!bins.length) return ['chronologie: n/d'];
   const t = timeline.totals();
-  const out = ['chronologie par tranches de 10 s (images · hors robot [rien ne répond] · puis, sur les images où quelque chose répond : rangée trouvée · arcs trouvés · les deux · sauvées par la prédiction · réponse max rangée/arcs · mouvement du téléphone):'];
+  const out = ['chronologie par tranches de 10 s (images · hors robot [rien ne répond] · puis, sur les images où quelque chose répond : rangée trouvée · arcs trouvés · les deux · sauvées par la prédiction · réponse max rangée/arcs · mouvement du téléphone · écart entre deux LED d\'un groupe en px à la taille analysée):'];
   let last = null;
   for (const b of bins) {
     if (b.cfg !== last) { out.push(`  réglages ${b.cfg} (seuil rangée/arcs/taille/groupe/cercle/demi-période)`); last = b.cfg; }
-    out.push(`  ${Math.round(b.start / 1000)}–${Math.round(b.end / 1000)} s : ${b.frames} · ${fmt(b.unseenPct, 0, ' %')} · ${fmt(b.rowSeenPct, 0, ' %')} · ${fmt(b.ringSeenPct, 0, ' %')} · ${fmt(b.bothSeenPct, 0, ' %')} · ${fmt(b.rescuedPct, 0, ' %')} · ${Math.round(b.rowPeak)}/${Math.round(b.ringPeak)} · ${fmt(b.motion, 0)} °/s`);
+    out.push(`  ${Math.round(b.start / 1000)}–${Math.round(b.end / 1000)} s : ${b.frames} · ${fmt(b.unseenPct, 0, ' %')} · ${fmt(b.rowSeenPct, 0, ' %')} · ${fmt(b.ringSeenPct, 0, ' %')} · ${fmt(b.bothSeenPct, 0, ' %')} · ${fmt(b.rescuedPct, 0, ' %')} · ${Math.round(b.rowPeak)}/${Math.round(b.ringPeak)} · ${fmt(b.motion, 0)} °/s · ${fmt(b.gap, 0)} px`);
   }
   out.push(`  tout : ${t.frames} images, hors robot ${fmt(t.unseenPct, 0, ' %')} ; sur les autres : rangée ${fmt(t.rowSeenPct, 0, ' %')}, arcs ${fmt(t.ringSeenPct, 0, ' %')}, les deux ${fmt(t.bothSeenPct, 0, ' %')} ; sauvées par la prédiction ${fmt(t.rescuedPct, 0, ' %')} (sur toutes les images : rangée ${fmt(t.rowPct, 0, ' %')}, arcs ${fmt(t.ringPct, 0, ' %')}, les deux ${fmt(t.bothPct, 0, ' %')})`);
   return out;
@@ -391,6 +409,7 @@ function report() {
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
     `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
+    `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
     `diagnostic arcs: ${squareOn() && win.diag?.ringCand.count ? `carré trouvé dans ${fmt(100 * win.diag.ringOk.mean, 0)} % des images, ${fmt(win.diag.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(win.diag.ringPeak.mean, 0)}, seuil des arcs ${state.ringThreshold}, ${fmt(100 * win.diag.rescued.mean, 0)} % sauvées par la prédiction` : 'n/d'}`,
     `échelle: ${win.diag?.scale.count ? `${fmt(win.diag.scale.mean, 2)} px/mm (LED d'un groupe à ${fmt(ROW_GAP * win.diag.scale.mean, 0)} px)` : 'n/d'}${win.last.loc?.scales?.row && win.last.loc?.scales?.ringMean ? `; rangée ${fmt(win.last.loc.scales.row, 2)}, carré ${fmt(win.last.loc.scales.ringMean, 2)}, rapport ${fmt(win.last.loc.scales.ratio, 2)}${win.last.loc.mismatch ? ' (INCOHÉRENT)' : ''}` : ''}; prédiction ${win.last.loc?.predicted ?? 'aucune'}${win.last.loc?.rescued ? ` (${win.last.loc.rescued})` : ''}`,
@@ -451,15 +470,22 @@ async function start(kind) {
   }
 }
 
+// 'A': the camera's own exposure; 'L4.0ms': locked, with the time it was locked at (the timeline notes when it changes)
+function exposureTag() {
+  const lock = $('lockExposure');
+  return lock && lock.classList.contains('on') ? `L${(Number($('exposureTime').value) / 10).toFixed(1)}ms` : 'A';
+}
+
 function setupExposure() {
   const e = exposureInfo(state.cam);
   const lock = $('lockExposure'), slider = $('exposureTime');
   lock.disabled = !e.canLock;
+  $('shortExposure').disabled = !e.canLock;
   lock.textContent = 'Verrouiller l\'exposition';
   lock.classList.remove('on');
   slider.style.display = $('exposureLabel').style.display = 'none';
   $('exposureNote').textContent = state.demo ? 'Scène simulée : pas d\'exposition.'
-    : e.canLock ? 'Verrouillée, l\'image ne s\'éblouit plus quand les LED apparaissent.'
+    : e.canLock ? 'À essayer, pas encore démontré : « Verrouiller » garde la durée d\'exposition du moment ; « Exposition courte » assombrit l\'image pour que les LED ressortent. Le rapport note le réglage de l\'exposition dans la chronologie.'
     : 'Cette caméra ne laisse pas la page régler l\'exposition (normal sur iPad : la caméra s\'adapte seule).';
 }
 
@@ -470,7 +496,9 @@ async function toggleExposure() {
   const locked = lock.classList.contains('on');
   try {
     if (!locked) {
-      await setExposure(cam, { mode: 'manual' });
+      // the exposure the camera had chosen is kept (a manual mode with no time may jump to a default: 20 ms on the phone of the 6th test)
+      const before = exposureInfo(cam);
+      await setExposure(cam, { mode: 'manual', ...(Number.isFinite(before.currentTime) ? { time: before.currentTime } : {}) });
       lock.classList.add('on');
       lock.textContent = 'Exposition verrouillée (cliquer pour libérer)';
       const e = exposureInfo(cam);
@@ -555,12 +583,52 @@ function robotOff(text) {
 document.addEventListener('thymio-connected', (e) => { if (!e.detail && robot.on) robotOff('Liaison perdue.'); });
 addEventListener('pagehide', () => { if (robot.on) robot.api?.stopScriptExecution?.().catch(() => {}); });
 
+// ---- settings the user may have touched by accident ----------------------------------------------------------
+// (the sliders are under the thumb when the page is scrolled: in the 6th test the threshold of the arcs went from 80 to 155 in the
+// middle of the run, which looked like an effect of the exposure lock)
+const DEFAULTS = { detect: 'diff', procAuto: true, blinkThreshold: 50, ringThreshold: 80, halfMs: HALF_MS, group: 0, circle: 1, signal: 'color' };
+function changedSettings() {
+  const out = [];
+  if (state.detect !== DEFAULTS.detect) out.push(`détection « ${state.detect} »`);
+  if (!state.procAuto) out.push(`taille fixée à ${state.procSize} px`);
+  if (state.blinkThreshold !== DEFAULTS.blinkThreshold) out.push(`seuil ${state.blinkThreshold} (défaut ${DEFAULTS.blinkThreshold})`);
+  if (state.ringThreshold !== DEFAULTS.ringThreshold) out.push(`seuil des arcs ${state.ringThreshold} (défaut ${DEFAULTS.ringThreshold})`);
+  if (state.halfMs !== DEFAULTS.halfMs) out.push(`demi-période ${state.halfMs} ms`);
+  if (state.group !== DEFAULTS.group) out.push(`LED vertes : groupe ${state.group}`);
+  if (state.circle !== DEFAULTS.circle) out.push(`arcs : ${circleLabel(state.circle)}`);
+  if (state.signal !== DEFAULTS.signal) out.push('signal « toute variation »');
+  return out;
+}
+function resetDefaults() {
+  Object.assign(state, { procAuto: true, blinkThreshold: DEFAULTS.blinkThreshold, ringThreshold: DEFAULTS.ringThreshold, halfMs: DEFAULTS.halfMs, group: DEFAULTS.group, circle: DEFAULTS.circle, signal: DEFAULTS.signal });
+  state.procSize = 480;
+  for (const [id, v] of [['procSize', 'auto'], ['ledGroup', String(state.group)], ['circleSet', String(state.circle)], ['blinkSpeed', String(state.halfMs)], ['ringThreshold', String(state.ringThreshold)], ['blinkThreshold', String(state.blinkThreshold)], ['signal', state.signal]]) $(id).value = v;
+  $('ringThresholdValue').textContent = String(state.ringThreshold);
+  $('blinkThresholdValue').textContent = String(state.blinkThreshold);
+  setDetect(DEFAULTS.detect);
+  applyBlink();
+  resendRobot();
+}
+
 // ---- wiring ------------------------------------------------------------------------------------------
 $('startBack').onclick = () => start('back');
 $('startFront').onclick = () => start('front');
 $('startDemo').onclick = () => start('demo');
 $('switchCam').onclick = () => start(state.facing === 'user' ? 'back' : 'front');
+$('defaults').onclick = resetDefaults;
 $('lockExposure').onclick = toggleExposure;
+$('shortExposure').onclick = async () => {
+  const cam = state.cam;
+  if (!cam) return;
+  const e = exposureInfo(cam), slider = $('exposureTime'), lock = $('lockExposure');
+  try {
+    const t = e.time ? Math.min(e.time.max, Math.max(e.time.min, 40)) : 40;          // 4 ms, in units of 0.1 ms
+    await setExposure(cam, { mode: 'manual', time: t });
+    lock.classList.add('on');
+    lock.textContent = 'Exposition verrouillée (cliquer pour libérer)';
+    if (e.time) { slider.min = e.time.min; slider.max = e.time.max; slider.step = e.time.step || 1; slider.value = t; slider.style.display = $('exposureLabel').style.display = ''; $('exposureValue').textContent = `${(t / 10).toFixed(1)} ms`; }
+  } catch (err) { $('exposureNote').textContent = `Refusé par la caméra : ${err?.message || err}`; }
+};
 $('robot').onclick = toggleRobot;
 async function resendRobot() {
   if (!robot.on || robot.busy) return;
@@ -591,7 +659,11 @@ $('threshold').oninput = (e) => { state.threshold = +e.target.value; $('threshol
 $('contrast').oninput = (e) => { state.contrast = +e.target.value; $('contrastValue').textContent = String(state.contrast); resetWindows(); resetAngles(); };
 $('colorFilter').onchange = (e) => { state.color = e.target.value; resetWindows(); resetAngles(); };
 $('mask').onchange = (e) => { state.mask = e.target.checked; };
-$('procSize').onchange = (e) => { state.procSize = +e.target.value; lock.reset(); resetWindows(); resetAngles(); };
+$('procSize').onchange = (e) => {
+  state.procAuto = e.target.value === 'auto';
+  if (!state.procAuto) state.procSize = +e.target.value;
+  lock.reset(); resetWindows(); resetAngles();
+};
 $('resetAngles').onclick = resetAngles;
 $('exposureTime').oninput = async (e) => {
   $('exposureValue').textContent = `${(e.target.value / 10).toFixed(1)} ms`;
@@ -620,7 +692,7 @@ $('ringThresholdValue').textContent = String(state.ringThreshold);
 $('ledGroup').value = String(state.group);
 $('circleSet').value = String(state.circle);
 $('blinkSpeed').value = String(state.halfMs);
-$('procSize').value = String(state.procSize);
+$('procSize').value = state.procAuto ? 'auto' : String(state.procSize);
 lock.hz = blinkHz();
 lock.windowMs = windowOf(state.halfMs);
 pdiff.halfMs = state.halfMs;

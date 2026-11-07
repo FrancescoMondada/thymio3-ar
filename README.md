@@ -137,6 +137,26 @@ Le rapport donne maintenant une **chronologie par tranches de 10 s** : images, p
 jeux sous 25 : le téléphone vise ailleurs), puis, sur les images où quelque chose répond, la part de rangée trouvée, d'arcs trouvés, des deux,
 sauvées par la prédiction, la réponse maximale de chaque jeu et le mouvement du téléphone ; un changement de réglage ouvre une nouvelle ligne.
 
+**Sixième essai** (2026-11-07 13h18, version b80584d, 480 px, 107 s, 1839 images, exposition verrouillée en cours de route) : 1 % hors robot ;
+sur les autres : rangée 75 %, arcs 46 %, les deux 46 %, 39 % sauvées par la prédiction. La chronologie raconte trois périodes.
+**0 à 20 s** : rangée 2 à 12 %, arcs 0 à 10 %, alors que les deux jeux répondent (réponses maximales 88–109, au-dessus des seuils 50 et 80).
+**20 à 67 s** (seuils 50 / 80, exposition automatique puis, vers 53–60 s, verrouillée) : rangée 82 à 98 %, les deux 71 à 98 %, dont 37 à 98 %
+**sauvées par la prédiction** : la prédiction croisée marche sur le téléphone ; les arcs ont une réponse maximale de 161–214 (puis 138 vers 60 s).
+**À partir de 67 s** : le seuil des arcs est à **155** (le réglage change dans la chronologie : le curseur a été touché par erreur, probablement en
+faisant défiler la page vers le bouton d'exposition), la rangée reste à 92–100 % mais les deux ne sont plus trouvés que dans 21 à 35 % des
+images (arcs à 138–161 de réponse maximale, sous le seuil, rattrapés seulement par la fenêtre). La baisse perçue « après le verrou » est donc
+au moins en grande partie l'effet du seuil à 155 ; un effet du verrou sur la réponse des arcs (210 → 140) n'est pas exclu : « Verrouiller »
+passait en mode manuel **sans fixer la durée du moment**, et la caméra a pris 199,9 (20 ms), peut-être une valeur par défaut plus longue que celle
+choisie par l'exposition automatique. Mesure : 13,5 images analysées par seconde (5,4 par période), lecture 38,9 ms, recherche 10,6 ms ; l'échelle
+vue va de 6 px (dernière image) à 11–27 px entre deux LED d'un groupe : la distance a beaucoup varié.
+Changements : réglages avancés **repliés** (les curseurs sont sous le pouce quand on fait défiler), un bandeau et une ligne du rapport quand un
+réglage n'est pas à sa valeur par défaut, un bouton « Remettre les valeurs par défaut » ; « Verrouiller l'exposition » garde la durée du moment ;
+un bouton « Exposition courte (4 ms) » (à essayer : les LED ressortent mieux sur un corps plus sombre ; pas démontré) ; l'état de l'exposition et
+l'écart entre LED (px) dans la chronologie ; **taille d'analyse automatique** (480 → 640 → 960 quand deux LED d'un groupe sont à moins de
+11 px, retour quand elles dépassent 42 px, avec un délai de 6 s ; si rien n'est trouvé alors que quelque chose répond, une taille plus grande est
+essayée). Test synthétique : sans flou, la détection tient jusqu'à 6 px entre deux LED (100 %), tombe à 5 px ; le flou et la réduction d'une vraie
+caméra la font tomber plus tôt, d'où la taille automatique.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les

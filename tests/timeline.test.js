@@ -64,3 +64,14 @@ test('pictures where nothing responds (the phone points away from the robot) are
   assert.equal(t.unseenPct, 40);
   assert.equal(t.rowSeenPct, 100);
 });
+
+test('the gap between two LEDs of a group, in px, is averaged per slice (the distance of the phone)', () => {
+  const tl = new Timeline();
+  tl.add(0, { row: false, gap: 6 });
+  tl.add(100, { row: true, gap: 10 });
+  tl.add(200, { row: true });
+  assert.equal(tl.bins()[0].gap, 8);
+  const tl2 = new Timeline();
+  tl2.add(0, { row: true });
+  assert.ok(Number.isNaN(tl2.bins()[0].gap));
+});

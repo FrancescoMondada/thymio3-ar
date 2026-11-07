@@ -21,12 +21,12 @@ export class Timeline {
 
   // one picture, at time tMs (ms, any origin): row / ring: found (true), not found (false) or not asked for (null);
   // rescued: the prediction of the other set found it; peaks: the strongest response of each set in this picture
-  add(tMs, { row = null, ring = null, rescued = false, rowPeak = 0, ringPeak = 0, motion = NaN, cfg = '', seen = true } = {}) {
+  add(tMs, { row = null, ring = null, rescued = false, rowPeak = 0, ringPeak = 0, motion = NaN, cfg = '', seen = true, gap = NaN } = {}) {
     if (this.t0 === null) this.t0 = tMs;
     const index = Math.floor((tMs - this.t0) / this.binMs);
     let bin = this.list[this.list.length - 1];
     if (!bin || bin.index !== index || bin.cfg !== cfg) {
-      bin = { index, cfg, start: tMs - this.t0, frames: 0, row: 0, rowAsked: 0, ring: 0, ringAsked: 0, both: 0, bothAsked: 0, rescued: 0, rowPeak: 0, ringPeak: 0, motionSum: 0, motionN: 0, end: tMs - this.t0, unseen: 0, rowS: 0, rowSAsked: 0, ringS: 0, ringSAsked: 0, bothS: 0, bothSAsked: 0 };
+      bin = { index, cfg, start: tMs - this.t0, frames: 0, row: 0, rowAsked: 0, ring: 0, ringAsked: 0, both: 0, bothAsked: 0, rescued: 0, rowPeak: 0, ringPeak: 0, motionSum: 0, motionN: 0, end: tMs - this.t0, unseen: 0, rowS: 0, rowSAsked: 0, ringS: 0, ringSAsked: 0, bothS: 0, bothSAsked: 0, gapSum: 0, gapN: 0 };
       this.list.push(bin);
       while (this.list.length > this.maxBins) this.list.shift();
     }
@@ -45,6 +45,7 @@ export class Timeline {
     bin.rowPeak = Math.max(bin.rowPeak, rowPeak);
     bin.ringPeak = Math.max(bin.ringPeak, ringPeak);
     if (Number.isFinite(motion)) { bin.motionSum += motion; bin.motionN++; }
+    if (Number.isFinite(gap)) { bin.gapSum += gap; bin.gapN++; }
   }
 
   bins() {
@@ -59,6 +60,7 @@ export class Timeline {
       ringSeenPct: b.ringSAsked ? (100 * b.ringS) / b.ringSAsked : NaN,
       bothSeenPct: b.bothSAsked ? (100 * b.bothS) / b.bothSAsked : NaN,
       motion: b.motionN ? b.motionSum / b.motionN : NaN,
+      gap: b.gapN ? b.gapSum / b.gapN : NaN,                         // px between two LEDs of a group (16 mm) at the size analysed
     }));
   }
 
