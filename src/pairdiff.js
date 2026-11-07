@@ -137,7 +137,7 @@ export class PairDiff {
     return this.ready;
   }
 
-  // The spots of the last picture (the SpotFinder result, plus `source`). With a `window` ({ bbox, inside(p) }: layout.js): only the
+  // The spots of the last picture (the SpotFinder result, plus `source`, and `peak`: the strongest response of P or N, found or not). With a `window` ({ bbox, inside(p) }: layout.js): only the
   // part of the picture inside it, which is where the page expects this set to be because the OTHER set has been found: the threshold
   // can then be lower than elsewhere (a faint arc next to a row that is seen well), without the noise of the rest of the picture.
   find(threshold, size, window = null) {
@@ -147,7 +147,7 @@ export class PairDiff {
     const useP = rp.spots.length >= rn.spots.length;
     this.source = useP ? 'P' : 'N';
     this.active = useP ? this.pf : this.nf;
-    return { ...(useP ? rp : rn), source: this.source };
+    return { ...(useP ? rp : rn), source: this.source, peak: Math.max(rp.brightest, rn.brightest) };
   }
 
   findIn(threshold, size, window) {
@@ -171,7 +171,7 @@ export class PairDiff {
     const rp = this.pf2.findFromValues(Pm, w, h, threshold, size);
     const rn = this.nf2.findFromValues(Nm, w, h, threshold, size);
     const useP = rp.spots.length >= rn.spots.length;
-    return { ...(useP ? rp : rn), source: useP ? 'P' : 'N', windowed: true };
+    return { ...(useP ? rp : rn), source: useP ? 'P' : 'N', windowed: true, peak: Math.max(rp.brightest, rn.brightest) };
   }
 
   // Paints what the settings let through (the one that find() used) into a picture.

@@ -12,6 +12,7 @@ import { PairDiff } from './pairdiff.js';
 import { pickAligned } from './aligned.js';
 import { pickSquare } from './square.js';
 import { locate } from './locate.js';
+import { Timeline } from './timeline.js';
 import { ROW_GAP } from './layout.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
@@ -24,6 +25,8 @@ const canvas = $('view');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
 const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
+const SEEN_PEAK = 25;                                                 // a response (0..255) under this in both sets: nothing blinks in the picture (the phone points away from the robot)
+const timeline = new Timeline();                                     // what happened over the whole test, in slices of 10 s (for the report)
 const pdiffAmber = new PairDiff({ halfMs: HALF_MS, measure: 'amber' });    // the same for the amber arcs of the ring
 const lock = new LockIn({ hz: hzOf(HALF_MS), windowMs: windowOf(HALF_MS), computeEvery: 90 });    // the sums are done at most every 90 ms: the pictures are all kept
 
@@ -58,7 +61,7 @@ function resetWindows() {
   win.cache = null;                               // the last result of the blink detection (the sums are not done on every picture)
   // what each set does, over the last 60 pictures: candidates found, whether it was picked, whether the other set's prediction saved it, the
   // strongest response, and the scale (px per mm) measured
-  win.diag = { rowCand: new Rolling(60), rowOk: new Rolling(60), rowPeak: new Rolling(60), ringCand: new Rolling(60), ringOk: new Rolling(60), ringPeak: new Rolling(60), rescued: new Rolling(60), scale: new Rolling(60), mismatch: new Rolling(60) };
+  win.diag = { rowCand: new Rolling(60), rowOk: new Rolling(60), rowPeak: new Rolling(60), ringCand: new Rolling(60), ringOk: new Rolling(60), ringPeak: new Rolling(60), rescued: new Rolling(60), unseen: new Rolling(60), scale: new Rolling(60), mismatch: new Rolling(60) };
 }
 
 // ---- the angle of view -------------------------------------------------------------------------------
@@ -140,11 +143,11 @@ function tick(cam, now, meta) {
       let waiting = false, brightest = 0;
       const spots = [];
       if (lineOn()) {
-        if (pdiff.push(img.data, W, H, t)) { const r = pdiff.find(state.blinkThreshold, size); spots.push(...tag(r.spots, 'line')); peakLine = r.brightest; brightest = Math.max(brightest, r.brightest); }
+        if (pdiff.push(img.data, W, H, t)) { const r = pdiff.find(state.blinkThreshold, size); spots.push(...tag(r.spots, 'line')); peakLine = r.peak; brightest = Math.max(brightest, r.peak); }
         else waiting = true;
       }
       if (squareOn()) {
-        if (pdiffAmber.push(img.data, W, H, t)) { const r = pdiffAmber.find(state.ringThreshold, arcSize); spots.push(...tag(r.spots, 'ring')); peakRing = r.brightest; brightest = Math.max(brightest, r.brightest); }
+        if (pdiffAmber.push(img.data, W, H, t)) { const r = pdiffAmber.find(state.ringThreshold, arcSize); spots.push(...tag(r.spots, 'ring')); peakRing = r.peak; brightest = Math.max(brightest, r.peak); }
         else waiting = true;
       }
       res = waiting ? { spots: [], brightest: 0, lit: 0, waiting: true } : { spots, brightest, lit: 0 };
@@ -199,6 +202,12 @@ function tick(cam, now, meta) {
       const d = win.diag, lineCand = res.spots.filter((sp) => sp.set === 'line').length, ringCand = res.spots.filter((sp) => sp.set === 'ring').length;
       if (lineOn()) { d.rowCand.push(lineCand); d.rowOk.push(alignOn() ? (aligned?.chosen.length >= 3 ? 1 : 0) : lineCand >= 1 ? 1 : 0); d.rowPeak.push(peakLine); }
       if (squareOn()) { d.ringCand.push(ringCand); d.ringOk.push(square?.full ? 1 : 0); d.ringPeak.push(peakRing); }
+      timeline.add(now, {
+        row: lineOn() ? (alignOn() ? (aligned?.chosen.length ?? 0) >= 3 : lineCand >= 1) : null, ring: squareOn() ? !!square?.full : null,
+        rescued: !!loc.rescued, rowPeak: peakLine, ringPeak: peakRing, motion: currentMotion(), seen: Math.max(peakLine, peakRing) >= SEEN_PEAK,
+        cfg: `${state.blinkThreshold}/${state.ringThreshold}/${state.procSize}/${state.group}/${state.circle}/${state.halfMs}`,
+      });
+      d.unseen.push(Math.max(peakLine, peakRing) < SEEN_PEAK ? 1 : 0);
       d.rescued.push(loc.rescued ? 1 : 0);
       d.mismatch.push(loc.mismatch ? 1 : 0);
       const sc = loc.scales?.row ?? loc.scales?.ringMean;
@@ -297,6 +306,7 @@ function refreshPanel() {
     alignOn() && dg.rowOk.count ? `Rangée : 3 ou 4 LED alignées dans ${pct(dg.rowOk)} des images (${fmt(dg.rowCand.mean, 1)} candidats, réponse max ${fmt(dg.rowPeak.mean, 0)}).` : '',
     squareOn() && dg.ringOk.count ? `Arcs : carré trouvé dans ${pct(dg.ringOk)} des images (${fmt(dg.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(dg.ringPeak.mean, 0)}${dg.rescued.mean > 0.005 ? `, ${pct(dg.rescued)} des images sauvées par la prédiction de l'autre jeu` : ''}).` : '',
     Number.isFinite(scaleNow) ? `Échelle : ${fmt(scaleNow, 2)} px/mm, deux LED d'un groupe à ${fmt(ROW_GAP * scaleNow, 0)} px${ROW_GAP * scaleNow < 8 ? ' : très petit, rapprochez-vous ou prenez 640 px' : ROW_GAP * scaleNow > 120 ? ' : très grand, éloignez-vous ou prenez 320 px' : ''}.` : '',
+    dg.unseen.mean > 0.2 ? `Rien ne répond dans ${pct(dg.unseen)} des dernières images : le robot est-il dans l'image ? (ces images comptent comme manquées)` : '',
     dg.mismatch.mean > 0.2 ? 'Les échelles de la rangée et du carré ne s\'accordent pas : l\'un des deux n\'est pas ce qu\'on croit.' : '',
   ].filter(Boolean).join(' ');
   $('detectNote').textContent = blink && robot.on && robot.mode !== 'blink' ? 'Le robot ne clignote pas : cette détection ne verra rien (choisissez « LED clignotantes »).'
@@ -351,6 +361,21 @@ function exposureText() {
   return e.modes ? `modes ${e.modes.join('/')}${e.time ? `, temps ${e.time.min}–${e.time.max} (×0,1 ms)` : ''}, actuel ${e.current || '?'}${e.currentTime != null ? ` ${e.currentTime}` : ''}` : 'non réglable par la page';
 }
 
+// the whole test in slices of 10 s: the rolling figures of the report cover a few seconds only
+function timelineLines() {
+  const bins = timeline.bins();
+  if (!bins.length) return ['chronologie: n/d'];
+  const t = timeline.totals();
+  const out = ['chronologie par tranches de 10 s (images · hors robot [rien ne répond] · puis, sur les images où quelque chose répond : rangée trouvée · arcs trouvés · les deux · sauvées par la prédiction · réponse max rangée/arcs · mouvement du téléphone):'];
+  let last = null;
+  for (const b of bins) {
+    if (b.cfg !== last) { out.push(`  réglages ${b.cfg} (seuil rangée/arcs/taille/groupe/cercle/demi-période)`); last = b.cfg; }
+    out.push(`  ${Math.round(b.start / 1000)}–${Math.round(b.end / 1000)} s : ${b.frames} · ${fmt(b.unseenPct, 0, ' %')} · ${fmt(b.rowSeenPct, 0, ' %')} · ${fmt(b.ringSeenPct, 0, ' %')} · ${fmt(b.bothSeenPct, 0, ' %')} · ${fmt(b.rescuedPct, 0, ' %')} · ${Math.round(b.rowPeak)}/${Math.round(b.ringPeak)} · ${fmt(b.motion, 0)} °/s`);
+  }
+  out.push(`  tout : ${t.frames} images, hors robot ${fmt(t.unseenPct, 0, ' %')} ; sur les autres : rangée ${fmt(t.rowSeenPct, 0, ' %')}, arcs ${fmt(t.ringSeenPct, 0, ' %')}, les deux ${fmt(t.bothSeenPct, 0, ' %')} ; sauvées par la prédiction ${fmt(t.rescuedPct, 0, ' %')} (sur toutes les images : rangée ${fmt(t.rowPct, 0, ' %')}, arcs ${fmt(t.ringPct, 0, ' %')}, les deux ${fmt(t.bothPct, 0, ' %')})`);
+  return out;
+}
+
 function report() {
   const { counts, weights, read, find, latency } = win;
   const d = Math.round(window.devicePixelRatio * 100) / 100;
@@ -369,6 +394,7 @@ function report() {
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
     `diagnostic arcs: ${squareOn() && win.diag?.ringCand.count ? `carré trouvé dans ${fmt(100 * win.diag.ringOk.mean, 0)} % des images, ${fmt(win.diag.ringCand.mean, 1)} candidats ambre, réponse max ${fmt(win.diag.ringPeak.mean, 0)}, seuil des arcs ${state.ringThreshold}, ${fmt(100 * win.diag.rescued.mean, 0)} % sauvées par la prédiction` : 'n/d'}`,
     `échelle: ${win.diag?.scale.count ? `${fmt(win.diag.scale.mean, 2)} px/mm (LED d'un groupe à ${fmt(ROW_GAP * win.diag.scale.mean, 0)} px)` : 'n/d'}${win.last.loc?.scales?.row && win.last.loc?.scales?.ringMean ? `; rangée ${fmt(win.last.loc.scales.row, 2)}, carré ${fmt(win.last.loc.scales.ringMean, 2)}, rapport ${fmt(win.last.loc.scales.ratio, 2)}${win.last.loc.mismatch ? ' (INCOHÉRENT)' : ''}` : ''}; prédiction ${win.last.loc?.predicted ?? 'aucune'}${win.last.loc?.rescued ? ` (${win.last.loc.rescued})` : ''}`,
+    ...timelineLines(),
     `images reçues/s: ${fmt(cameraFps(), 1)}  analysées/s: ${fmt(win.rateOut.perSecond, 1)}  par période de clignotement: ${fmt((win.rateOut.perSecond * 2 * state.halfMs) / 1000, 1)}`,
     `retard caméra→page: ${latency.count ? `${fmt(latency.mean, 0)} ms (${win.latencyKind})` : 'n/d'}`,
     `lecture de l'image: moy ${fmt(read.mean, 1)} max ${fmt(read.max, 1)} ms`,
@@ -412,6 +438,7 @@ async function start(kind) {
       ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), ringGain: params.has('ring') ? Number(params.get('ring')) : 1, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
+    timeline.reset();
     resetWindows();
     resetAngles();
     $('splash').style.display = 'none';

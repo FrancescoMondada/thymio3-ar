@@ -125,6 +125,18 @@ ambre tolérante, la contrainte de même taille, et la prédiction croisée (id�
 **Pas encore réessayé sur le téléphone.** Le rapport affiche maintenant, par jeu : candidats trouvés, part d'images où il est retenu, réponse
 maximale, part sauvée par la prédiction, échelle mesurée.
 
+**Cinquième essai** (2026-11-07 12h21, version 31cb3a3 : seuils par défaut 50 / arcs 80, analyse en 540×960 : l'utilisateur avait pris 960 px, d'où
+14,5 images analysées par seconde au lieu de 22,9 à 480 px, 5,8 par période de clignotement ; lecture 30 ms + recherche 30 ms) : **43 % des
+870 images sont complètes** (8 points sur 8), contre 37 % au quatrième essai (à l'arrêt 40 % contre 37, mouvement lent 47 % contre 29, rapide 33 %
+contre 20). Dans les 60 dernières images la rangée a une réponse maximale de 13 sur 255 (0 candidat) et le carré est trouvé dans 8 % : **le
+téléphone ne visait pas le robot** (l'utilisateur lisait les réglages), ce qui explique ce moment et le profil « tout ou rien » (en moyenne 2,4
+points sur 8 dans les images incomplètes) : 43 % est donc un minimum. Pendant ces images la réponse des arcs allait jusqu'à 107, au-dessus du seuil
+de 80, mais sans la rangée il n'y a pas de fenêtre ni de rattrapage. Les seuils n'ont pas été modifiés par l'utilisateur : rien dans ce rapport
+ne demande de les changer (une rangée à 13 est invisible, aucun seuil ne la rattrape ; les arcs à 107 passent le seuil).
+Le rapport donne maintenant une **chronologie par tranches de 10 s** : images, part « hors robot » (rien ne répond : réponse maximale des deux
+jeux sous 25 : le téléphone vise ailleurs), puis, sur les images où quelque chose répond, la part de rangée trouvée, d'arcs trouvés, des deux,
+sauvées par la prédiction, la réponse maximale de chaque jeu et le mouvement du téléphone ; un changement de réglage ouvre une nouvelle ligne.
+
 **Premier essai sur un téléphone** (Android, Chrome, 2026-11-06) : 0 point. 5,9 images analysées par seconde (analyse en
 720×1280 : 125 ms par image, quatre fois plus de pixels que mesuré), un clignotement à 7,46 Hz (sous-échantillonné), le script
 du robot arrêté au moment du rapport. Remarques de l'utilisateur : fréquence trop haute et pas synchronisée avec l'image ; les
