@@ -39,6 +39,9 @@ export const OUTSIDE_PICTURES = 6;               // the middle of the ring has b
 export const RING_LOST_MS = 2000;               // ... and for this long: the map is lost (the row alone keeps a map alive by shifts, but cannot say how it is turned)
 export const STRUGGLE_MS = 500;                 // the dual flash: no full fit (6 of the 8 lit places agreeing) for this long: the map is struggling, a start from the picture is tried against it
 export const RETRY_MS = 250;                    // ... at most this often
+export const FOND_SHARE = 0.6;                  // the dual flash lights one set of 4 arcs at a time: when the set that is dark answers this share of the lit one, over the last FOND_PICTURES pictures (median), the map is on a background
+export const FOND_START = 0.75;                 // ... and a start from ONE picture is refused above this (a real robot has its dark arcs quiet: a glow reaches a neighbour a little)
+export const FOND_PICTURES = 8;                 // (the 18th report: maps on the bed, on the wood, while the robot sat lit in plain view)
 export const MIN_SCALE = 0.25;                  // px/mm for a picture 640 px long: a map smaller than this is not the robot (the 17th report: maps of 0.07 to 0.17 held for seconds, all the places on one blob)
 
 // the places of the LEDs of the group and of the arcs of the set, in the plane of the robot, for a layout of the row (mirror = +1 or -1).
@@ -107,6 +110,7 @@ export class Tracker {
   hi(colour) { return this.known[colour] ? HI_SHARE * this.signal[colour] : Infinity; }
 
   constructor() {
+    this.fondOff = false;                       // true: the test of the background (quietness) is not made (`?fond=0` in the address: to see what the report says without it)
     this.mirror = 0;                            // 0: not known yet, +1 / -1 once an acquisition has chosen
     this.stats = {};                            // per place, over the whole session: see below (the report)
     // how strong the lights answer in this view (0..255): the MEDIAN of the last 80 fresh answers of each colour. It belongs to the lights and the exposure, not to a map,
@@ -132,6 +136,7 @@ export class Tracker {
     this.dt = 0;
     this.outside = 0;                           // pictures in a row in which the middle of the ring is outside the picture
     this.pending = null;                        // a map found from the ring alone: which way round it is (the row says) is not known yet
+    this.fondRatios = [];                       // dark / lit of the two sets of arcs, in the last pictures (see quietness)
     this.fullT = null;                          // time of the last picture in which 6 or more of the 8 places of the lit flash agreed in one fit (dual flash)
     this.tryT = null;                           // time of the last start tried against a map that was struggling
     this.lostBy = null;
@@ -141,6 +146,21 @@ export class Tracker {
   // not tried too often. Only with the dual flash, where the picture alone gives a whole map.
   struggling(t) {
     return !!this.dual && !!this.H && t != null && this.fullT != null && t - this.fullT > STRUGGLE_MS && (this.tryT == null || t - this.tryT >= RETRY_MS);
+  }
+
+  // The two sets of arcs light up in turn: the strength of the response (map P of the amber) at the places of each set, as medians over its 4 arcs, read at the very place (a disc of
+  // 1 to 3 px: the arcs of the other set are 45 degrees away, 12 px at 0.6 px/mm, and an arc's glow must not reach the place of its neighbour). A real map has one set strong and
+  // the other quiet; a map laid on a textured background (a bed, wood, a window with lamps in it, seen by a hand that moves) has both answering, whatever the flash.
+  // -> { lit, dark, ratio (dark / lit), valid (the lit set answers) }
+  quietness(H, maps, w, h) {
+    const med = (a) => { const v = a.slice().sort((x, y) => x - y); return (v[1] + v[2]) / 2; };
+    const sets = [[], []];
+    for (let i = 0; i < 8; i++) {
+      const [X, Y] = ring(i), q = applyH(H, X, Y), sc = scaleAt(H, X, Y);
+      sets[i % 2].push(peakNear(maps.amber[0], w, h, q.x, q.y, Math.max(1, Math.min(3, Math.round(0.1 * SQUARE_SIDE * sc)))));
+    }
+    const a = med(sets[0]), b = med(sets[1]), lit = Math.max(a, b), dark = Math.min(a, b), tau = Math.max(FLOOR, TAU_SHARE * this.signal.amber);
+    return { lit, dark, ratio: lit > 0 ? dark / lit : 0, valid: lit >= tau, tau };
   }
 
   // how many of the 8 places of the flash `par` have a response under them in the fresh map (the same question for two maps: which one explains the picture better)
@@ -163,9 +183,23 @@ export class Tracker {
     if (!m || this.H || t == null || m.t == null) return null;
     const dt = (t - m.t) / 1000;
     if (dt < 0 || dt > ZONE_MEMORY_S) return null;
-    const L = Math.max(w, h), drift = Math.min(dt, 0.6), r = m.r * L + 0.06 * L + 0.19 * L * dt;
+    const L = Math.max(w, h), drift = Math.min(dt, 0.6), r0 = m.r * L + 0.06 * L, r = r0 + 0.19 * L * dt;
     if (!(r < 0.5 * L)) return null;
-    return { cx: (m.cx + m.vx * drift) * w, cy: (m.cy + m.vy * drift) * h, r };
+    // the speed carries the centre a little (a hand keeps moving) but never further than half the disc it had: the speed of a map that was struggling is not to be trusted (the 18th
+    // report: the zone, drawn dashed, flew off in all directions)
+    let sx = m.vx * drift * w, sy = m.vy * drift * h;
+    const sl = Math.hypot(sx, sy), cap = 0.5 * r0;
+    if (sl > cap) { sx *= cap / sl; sy *= cap / sl; }
+    return { cx: m.cx * w + sx, cy: m.cy * h + sy, r };
+  }
+
+  // The map is struggling (not lost): the robot is where the map says, give or take the error of the map (it can be wrong by a zoom): a disc of 100 mm round the middle of the ring
+  // at the scale of the map, with a margin. Null when it would be half the picture. -> { cx, cy, r } in px
+  mapZone(w, h) {
+    if (!this.H) return null;
+    const c = applyH(this.H, 0, 26), s0 = scaleAt(this.H, 0, 26), L = Math.max(w, h), r = 100 * s0 + 0.12 * L;
+    if (!Number.isFinite(c.x) || !Number.isFinite(c.y) || !(r < 0.5 * L)) return null;
+    return { cx: c.x, cy: c.y, r };
   }
 
   rememberMap(w, h, t) {
@@ -229,7 +263,7 @@ export class Tracker {
       if (!acquired && !tryAgain) return this.result('lost', [], null);
       if (acquired) {
         if (!tryAgain) this.v = { x: 0, y: 0 };                       // (a map that replaces a struggling one keeps the speed the phone had)
-        this.ringT = t; this.fixT = t; this.ringFullT = t; this.fullT = t; this.pending = dual ? null : { t0: t, n: 0 };
+        this.ringT = t; this.fixT = t; this.ringFullT = t; this.fullT = t; this.fondRatios = []; this.pending = dual ? null : { t0: t, n: 0 };
       }
     } else if (!dual && found && !this.pending && t != null && this.ringFullT != null && t - this.ringFullT > REFRESH_MS) {
       // three arcs have corrected the map for a second (an affine correction cannot repair the shape of the map: one wrong fit once is kept for good): a
@@ -390,7 +424,15 @@ export class Tracker {
     if (this.H && this.coast > 8) { this.H = null; this.coast = 0; state = 'lost'; this.lostBy = 'coast'; this.pending = null; }
     else if (state === 'idle') state = 'coast';
     if (state !== 'lost' && this.coast > 0 && state !== 'acquire') state = 'coast';
-    if (this.H && state !== 'lost' && t != null) this.rememberMap(w, h, t);
+    // a map laid on a background: both sets of arcs answer, picture after picture (a real map has the set that is dark quiet): the median of the last pictures' ratios
+    if (this.H && dual) {
+      const qn = this.quietness(this.H, maps, w, h);
+      if (qn.valid) { this.fondRatios.push(qn.ratio); if (this.fondRatios.length > FOND_PICTURES) this.fondRatios.shift(); }
+      const sorted = this.fondRatios.slice().sort((x, y) => x - y), medRatio = sorted.length ? sorted[sorted.length >> 1] : 0;
+      if (this.diag) { this.diag.qLit = Math.round(qn.lit); this.diag.qDark = Math.round(qn.dark); this.diag.fondRatio = Math.round(100 * medRatio) / 100; }
+      if (!this.fondOff && this.fondRatios.length >= FOND_PICTURES && medRatio >= FOND_SHARE) { this.H = null; this.coast = 0; state = 'lost'; this.lostBy = 'fond'; this.pending = null; this.fondRatios = []; this.lastMap = null; }
+    }
+    if (this.H && state !== 'lost' && t != null && this.fullT != null && t - this.fullT < 1000) this.rememberMap(w, h, t);       // (only a map that is healthy says where the robot is)
     return this.result(state, obs, rms);
   }
 
@@ -544,6 +586,12 @@ export class Tracker {
       }
     }
     if (!hyps.length) { this.acqFail = { reason: 'coins non frais' }; return false; }
+    // a square and a row that are the lights of a background answer in both flashes: the arcs of the set that should be dark answer as much as the others
+    if (!this.fondOff) {
+      const quietHyps = hyps.filter((hp) => { const q = this.quietness(hp.H, maps, w, h); return !(q.valid && q.ratio >= FOND_START); });
+      if (!quietHyps.length) { this.acqFail = { reason: 'fond' }; return false; }
+      hyps.splice(0, hyps.length, ...quietHyps);
+    }
     // the best hypothesis of each (set, quarter turn, square): the layout of the row may be either, the others differ by much more
     const byKey = new Map();
     for (const hp of hyps) { const k = `${squares.indexOf(hp.square)}/${hp.par}/${hp.rot}`; if (!byKey.has(k) || hp.err < byKey.get(k).err) byKey.set(k, hp); }

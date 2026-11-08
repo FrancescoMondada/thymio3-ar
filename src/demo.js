@@ -15,6 +15,7 @@
 
 import { fromStream } from './camera.js';
 import { HALF_MS, groupMembers, circleMembers, isAlternating, isDual } from './script.js';
+import { ring } from './layout.js';
 
 export const DEMO_W = 1280;
 export const DEMO_H = 720;
@@ -64,6 +65,13 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
 export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12, dist = 380, rowGain = 1, rowShift = 0, jumpEvery = 0, jumpFactor = 1 } = {}) {
+  // `&noise=300`: that many dots of colour noise a picture (amber or green, faint), the camera's noise in the dark; `&glare=6`: that many steady warm or green lights in the
+  // picture (the lamps of a room seen in a window), which move with the picture and so light up the pair difference when the phone moves (the 17th and 18th reports were made at night)
+  const qs = new URLSearchParams(typeof location !== 'undefined' ? location.search : '');
+  const noiseN = Number(qs.get('noise') || 0), glareN = Number(qs.get('glare') || 0);
+  const decoyMm = Number(qs.get('decoy') || 0);                // `&decoy=170`: a second pattern like the robot's 16 places, steady, 170 mm to the side on the table (a background that answers whenever the picture moves)
+  let seed = 12345; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 2 ** 32; };
+  const glares = Array.from({ length: glareN }, () => ({ x: 60 + rnd() * (DEMO_W - 120), y: 40 + rnd() * (DEMO_H - 80), r: 5 + rnd() * 10, amber: rnd() < 0.7 }));
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -149,6 +157,13 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
       }
       g.restore();
     }
+    view.truth = { x: project(cam, [0, 26, 0]).x, y: project(cam, [0, 26, 0]).y };           // where the middle of the ring is in the 1280 x 720 picture (without the sway)
+    if (decoyMm) {
+      const dec = (X, Y, mm, c0, c1) => glow(project(cam, [X + decoyMm, Y, 0]), mm, [c0, c1, c1, 'rgba(0,0,0,0)']);
+      for (let i = 0; i < 8; i++) { const [X, Y] = ring(i); dec(X, Y, 3.4, 'rgb(255,235,160)', 'rgb(255,185,25)'); }
+      for (const [k, p] of leds.entries()) if (k % 2 === 0) dec(p[0], p[1], 2.6, 'rgb(190,255,190)', 'rgb(70,255,70)');
+    }
+    for (const gl of glares) glow({ x: gl.x, y: gl.y, z: FOCAL }, gl.r, gl.amber ? ['rgb(255,245,200)', 'rgb(255,190,60)', 'rgb(255,160,20)', 'rgba(255,150,0,0)'] : ['rgb(230,255,230)', 'rgb(90,255,90)', 'rgb(40,230,40)', 'rgba(30,220,30,0)']);
     if (extra) {
       // steady lights that are not the ones asked for: a blue one at the front, a red glow low at each side of the back, an
       // amber light on the table (a lamp, an orange object)
@@ -157,12 +172,19 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
       glow(project(cam, [80, 25, -HEIGHT]), 5, ['rgb(255,235,160)', 'rgb(255,190,40)', 'rgb(255,170,20)', 'rgba(255,150,0,0)']);
     }
     g.restore();
+    if (noiseN) for (let i = 0; i < noiseN; i++) {
+      g.globalAlpha = 0.1 + 0.25 * Math.random();
+      g.fillStyle = Math.random() < 0.5 ? 'rgb(255,170,30)' : 'rgb(80,230,80)';
+      g.fillRect(Math.floor(Math.random() * DEMO_W), Math.floor(Math.random() * DEMO_H), 2, 2);
+    }
+    g.globalAlpha = 1;
   };
   draw();
   const timer = setInterval(draw, 1000 / 30);
   const stream = canvas.captureStream(30);
   const cam = await fromStream(stream, { label: 'scène simulée', stopExtra: () => clearInterval(timer) });
   cam.angle = () => view.elev;
+  cam.truth = () => ({ x: view.truth.x + (sway ? sway * Math.sin(2 * Math.PI * 0.6 * ((performance.now() - t0) / 1000)) : 0), y: view.truth.y + (sway ? 0.5 * sway * Math.sin(2 * Math.PI * 0.6 * ((performance.now() - t0) / 1000) + 1) : 0) });
   cam.motion = () => view.motion;              // the page reads the movement here instead of the motion sensor                 // the page reads the angle here instead of the orientation sensor
   return cam;
 }

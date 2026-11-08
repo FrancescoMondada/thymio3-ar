@@ -257,3 +257,74 @@ test('a healthy map is not replaced: no start from the picture while the places 
     assert.equal(acquisitions(out), 1);
   }
 });
+
+test('the zone is not carried far by a speed that cannot be trusted (the 18th report: the dashed circle flew off in all directions)', () => {
+  const tr = new Tracker();
+  tr.lastMap = { t: 1000, cx: 0.5, cy: 0.5, r: 40 / 640, vx: 3, vy: -2 };       // a map that was lost with a speed of 3 pictures a second
+  const r0 = 40 + 0.06 * 640;
+  for (const dt of [0.1, 0.3, 0.6, 1.5]) {
+    const z = tr.searchZone(1000 + dt * 1000, 640, 360);
+    assert.ok(z, `a zone after ${dt} s`);
+    assert.ok(Math.hypot(z.cx - 320, z.cy - 180) <= 0.5 * r0 + 1e-6, `after ${dt} s the centre is ${Math.hypot(z.cx - 320, z.cy - 180).toFixed(0)} px from the last place (at most ${(0.5 * r0).toFixed(0)})`);
+  }
+  tr.lastMap.vx = 0.1; tr.lastMap.vy = 0;                                         // a small speed still carries it
+  const z = tr.searchZone(1300, 640, 360);
+  assert.ok(Math.abs(z.cx - (320 + 0.1 * 0.3 * 640)) < 1e-6, 'a hand that moves 10 % of the picture a second: 0.3 s of it');
+});
+
+// A background that answers in BOTH flashes (a textured bed or table lit by lamps, seen by a hand that moves, the 18th report): the maps of the scene with the 16 places lit all the
+// time, as P and N, at the places of a robot shifted by (dx, dy) px
+import { HALF_MS } from '../src/script.js';
+function decoyFrame(scene, t, dx, dy) {
+  const a = scene.frame(t), b = scene.frame(t + HALF_MS), w = a.w, h = a.h;
+  const shift = (m) => { const o = new Uint8Array(w * h); for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const sx = x - dx, sy = y - dy; if (sx >= 0 && sy >= 0 && sx < w && sy < h) o[y * w + x] = m[sy * w + sx]; } return o; };
+  const both = (i, c) => { const p = shift(a.maps[c][i]), q = shift(b.maps[c][i]); for (let k = 0; k < p.length; k++) if (q[k] > p[k]) p[k] = q[k]; return p; };
+  return { maps: { green: [both(0, 'green'), both(1, 'green')], amber: [both(0, 'amber'), both(1, 'amber')] }, w, h };
+}
+const shiftFound = (found, dx, dy) => ({ rings: found.rings.map((sq) => sq.map((c) => ({ ...c, x: c.x + dx, y: c.y + dy }))), row: found.row.map((c) => ({ ...c, x: c.x + dx, y: c.y + dy })) });
+
+test('a background that answers in both flashes is not a map: a start on it is refused ("fond"), and a map that ends up on it is dropped', () => {
+  const scene = makeDualScene({ path: path({ dist: 600 }), distractors: 0 });
+  // (1) only the background: its squares and rows are found, they are refused
+  let tr = new Tracker(), fails = {};
+  for (let i = 0; i < 40; i++) {
+    const t = T0 + i * 71, f = decoyFrame(scene, t, 0, 0), found = scene.found(t, { noise: 0.4 });
+    const r = tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found, motion: 0, t });
+    assert.equal(r.tracking, false, `picture ${i}: no map on a background`);
+    if (r.acqFail) fails[r.acqFail.reason] = (fails[r.acqFail.reason] || 0) + 1;
+  }
+  assert.ok(fails.fond >= 30, `refused as a background: ${JSON.stringify(fails)}`);
+  // (2) a real robot, then the lights go to the background (the same places answer in both flashes): the map is dropped within a second and a half
+  tr = new Tracker();
+  const real = run(scene, { frames: 30, fps: 14, tracker: tr });
+  assert.equal(real.out[real.out.length - 1].tracking, true);
+  let t = real.out[real.out.length - 1].t, lostAt = null, why = null;
+  for (let i = 0; i < 40; i++) {
+    t += 71;
+    const f = decoyFrame(scene, t, 0, 0), found = scene.found(t, { noise: 0.4 });
+    const r = tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found, motion: 0, t });
+    if (r.state === 'lost' && lostAt === null) { lostAt = i; why = r.lostBy; }
+  }
+  assert.ok(lostAt !== null && lostAt <= 21, `the map on the background was dropped after ${lostAt} pictures`);
+  assert.equal(why, 'fond');
+});
+
+test('a real robot is not taken for a background: one set answers, the other is quiet, every flash, far or near, dim LEDs, a swaying hand (no start refused for it)', () => {
+  for (const opts of [{ dist: 450 }, { dist: 700 }, { dist: 650, rowGains: [1, 0.3, 1, 0.3] }]) {
+    const { out, tr } = run(makeDualScene({ path: path({ dist: opts.dist }), shift: swayShift(60), rowGains: opts.rowGains }), { frames: 14 * 20 });
+    assert.equal(acquisitions(out), 1, JSON.stringify(opts));
+    assert.ok(out.every((o) => o.lostBy !== 'fond'), 'never dropped as a background');
+    assert.ok(tr.fondRatios.length < 8 || tr.fondRatios.slice().sort((a, b) => a - b)[4] < 0.6, 'the ratio of a real robot is small');
+  }
+});
+
+test('the test of the background can be turned off (?fond=0): the same decoy is then taken for a map', () => {
+  const scene = makeDualScene({ path: path({ dist: 600 }), distractors: 0 }), tr = new Tracker();
+  tr.fondOff = true;
+  let acquired = 0;
+  for (let i = 0; i < 20; i++) {
+    const t = T0 + i * 71, f = decoyFrame(scene, t, 0, 0), found = scene.found(t, { noise: 0.4 });
+    if (tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found, motion: 0, t }).state === 'acquire') acquired++;
+  }
+  assert.ok(acquired >= 1, 'a map on the background when the test is off');
+});
