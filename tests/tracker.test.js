@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Tracker, expectedPoints, slide } from '../src/tracker.js';
+import { Tracker, expectedPoints, slide, validMap } from '../src/tracker.js';
 import { applyH, compose } from '../src/homography.js';
 import { makeScene } from './evidence_scene.js';
 
@@ -227,6 +227,62 @@ test('the picture is analysed at another size: the map is rescaled and carries o
   }
   assert.equal(acquisitions(out), 0, 'no new acquisition');
   assert.ok(out.every((o) => o.tracking && o.err < 6), `worst place ${Math.max(...out.map((o) => o.err)).toFixed(1)} px`);
+});
+
+test('a map that is not the map of a table seen from above is never kept (the places that flew far outside the picture, then the page froze)', () => {
+  const good = [1.2, 0.1, 300, -0.05, 0.9, 200, 0.0002, 0.0003, 1];
+  assert.equal(validMap(good, 640, 360), true);
+  assert.equal(validMap([...good.slice(0, 6), 0.5, 0.5, 1], 640, 360), false, 'the horizon crosses the robot');
+  assert.equal(validMap([1, 0, 1e6, 0, 1, 0, 0, 0, 1], 640, 360), false, 'the robot is a million pixels away');
+  assert.equal(validMap([1e5, 0, 300, 0, 1e5, 200, 0, 0, 1], 640, 360), false, '100 000 px per mm');
+  assert.equal(validMap([NaN, 0, 0, 0, 1, 0, 0, 0, 1], 640, 360), false);
+  assert.equal(validMap(null, 640, 360), false);
+  // a tracker that is handed such a map does not loop on it and does not keep it
+  const scene = makeScene({ path: swayPath() }), { tr } = run(makeScene({ path: swayPath() }), { frames: 40 });
+  tr.H = [1e4, 0, 300, 0, 1e4, 200, 0.5, 0.5, 1];
+  const f = scene.frame(T0 + 5000), a = Date.now();
+  const r = tr.update({ maps: f.maps, w: f.w, h: f.h, group: 0, circle: 1, found: null, motion: 8, t: T0 + 5000 });
+  assert.ok(Date.now() - a < 300, 'quick');
+  assert.equal(r.tracking, false);
+  assert.ok(r.invalid >= 1);
+});
+
+test('a map whose ring has left the picture is dropped after a few pictures, not kept with its places and its lines drawn nowhere', () => {
+  const scene = makeScene({ w: 640, path: swayPath() }), { tr, out } = run(scene, { frames: 40 });
+  assert.ok(out[39].tracking);
+  const t0 = out[39].t;
+  const c0 = applyH(tr.H, 0, 26);
+  tr.H = compose([1, 0, -(c0.x + 40), 0, 1, 0, 0, 0, 1], tr.H);               // valid, but the ring is now 40 px to the left of the picture
+  const after = [];
+  for (let i = 0; i < 12; i++) {
+    const t = t0 + 60 * (i + 1), f = scene.frame(t);
+    after.push(tr.update({ maps: { green: [new Uint8Array(f.w * f.h), new Uint8Array(f.w * f.h)], amber: [new Uint8Array(f.w * f.h), new Uint8Array(f.w * f.h)] }, w: f.w, h: f.h, group: 0, circle: 1, found: null, motion: 8, t }));
+  }
+  const lost = after.findIndex((r) => r.state === 'lost');
+  assert.ok(lost >= 0 && lost <= 6, `lost at picture ${lost}`);
+  assert.equal(after[lost].lostBy, 'hors image');
+});
+
+test('slide is bounded whatever reach it is given (a reach from a map that went wrong)', () => {
+  const w = 640, h = 360, P = new Uint8Array(w * h), places = [0, 1, 2, 3].map((j) => ({ px: { x: 300 + 12 * j, y: 200 } }));
+  for (const reach of [1e9, Infinity, NaN, -5, 1e5]) {
+    const a = Date.now();
+    slide(P, w, h, places, { tau: 20, cap: 100, reach });
+    assert.ok(Date.now() - a < 200, `reach ${reach}: ${Date.now() - a} ms`);
+  }
+  assert.equal(slide(P, w, h, [{ px: { x: NaN, y: 3 } }], { tau: 20, cap: 100, reach: 10 }), null);
+});
+
+test('one blob is the answer of one place only: a big glow between two arcs does not make a map out of two arcs on one point', () => {
+  const scene = makeScene({ path: swayPath() }), { tr } = run(scene, { frames: 40 });
+  const t = T0 + 4000, f = scene.frame(t), tr0 = f.truth;
+  // the ring lit now: a strong wide blob exactly between two neighbouring arcs, in the fresh map of the amber, and the arcs themselves taken out
+  const paint = (cx, cy, sg, a) => { const r = Math.ceil(3 * sg); for (let y = Math.floor(cy) - r; y <= Math.floor(cy) + r; y++) for (let x = Math.floor(cx) - r; x <= Math.floor(cx) + r; x++) { if (x < 0 || y < 0 || x >= f.w || y >= f.h) continue; const v = Math.round(a * Math.exp(-((x - cx) ** 2 + (y - cy) ** 2) / (2 * sg * sg))); if (v > f.maps.amber[0][y * f.w + x]) f.maps.amber[0][y * f.w + x] = v; } };
+  const mx = (tr0.ring[0].x + tr0.ring[1].x) / 2, my = (tr0.ring[0].y + tr0.ring[1].y) / 2;
+  paint(mx, my, 12, 255);
+  const r = tr.update({ maps: f.maps, w: f.w, h: f.h, group: 0, circle: 1, found: null, motion: 8, t });
+  const claimed = r.points.filter((o) => o.set === 'ring' && o.matched).map((o) => `${o.blob.x.toFixed(1)},${o.blob.y.toFixed(1)}`);
+  assert.equal(new Set(claimed).size, claimed.length, 'no two arcs on the same blob');
 });
 
 test('the pattern slides to where the most places answer, the nearest shift winning a tie', () => {

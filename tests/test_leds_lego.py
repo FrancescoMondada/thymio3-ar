@@ -31,6 +31,8 @@ class Robot:
         self.events = []                    # ("behaviors off",) or ("led", row, i, level, time)
         self.sleeps = []
         self.state = {"front": [None] * 8, "back": [None] * 8, "circle": [None] * 8}
+        # the other lights, all lit when the script starts (what an earlier script or behavior left): name -> level
+        self.other = {**{"rgb%d" % i: 16 for i in range(6)}, **{"button%d" % i: 16 for i in range(4)}, "color": 16, "receiver": 16, "microphone": 16}
 
     def modules(self):
         robot = self
@@ -49,6 +51,19 @@ class Robot:
                 robot.state[self.row][self.i] = level
                 robot.now += robot.cost
 
+        class Other:
+            def __init__(self, name):
+                self.name = name
+
+            def off(self):
+                robot.other[self.name] = 0
+                robot.events.append(("other off", self.name))
+
+        th.LEDS_RGB = lambda i: Other("rgb%d" % i)
+        th.LEDS_BUTTONS = lambda i: Other("button%d" % i)
+        th.LED_COLOR = lambda: Other("color")
+        th.LED_RECEIVER = lambda: Other("receiver")
+        th.LED_MICROPHONE = lambda: Other("microphone")
         th.BEHAVIORS = Behaviors
         th.LEDS_LEGO_FRONT = lambda i: Led("front", i)
         th.LEDS_LEGO_BACK = lambda i: Led("back", i)
@@ -126,6 +141,23 @@ class SteadyModes(unittest.TestCase):
         for row in ("front", "back"):
             self.assertEqual(r.state[row], [0] * 8)
         self.assertEqual({e[3] for e in r.events if e[0] == "led"}, {0})
+
+
+class OtherLights(unittest.TestCase):
+    """The 12th test: the corners of the robot glowed magenta and cyan and the colour LED blue while the script ran. Every other light goes out."""
+
+    def test_every_other_light_is_put_out_whatever_the_mode(self):
+        for mode in ("on", "off", "blink"):
+            r = Robot(mode, 1200, group=0, circle=1).run()
+            self.assertEqual(set(r.other.values()), {0}, mode)
+            self.assertEqual(len(r.other), 6 + 4 + 3)
+
+    def test_they_go_out_after_the_behaviors_and_before_the_first_lego_led(self):
+        r = Robot("blink", 1200, group=0, circle=1).run()
+        kinds = [e[0] for e in r.events]
+        self.assertEqual(kinds[0], "behaviors off")
+        first_led = kinds.index("led")
+        self.assertEqual(sorted(e[1] for e in r.events[1:first_led] if e[0] == "other off"), sorted(r.other))
 
 
 class Blink(unittest.TestCase):

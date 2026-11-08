@@ -119,7 +119,18 @@ function schedule(cam) {
   else requestAnimationFrame((now) => tick(cam, now, {}));
 }
 
+// An exception in one picture must not end the loop (the display would stop, as if the page had frozen): it is counted, kept for the report, the map is dropped,
+// and the next picture is waited for.
 function tick(cam, now, meta) {
+  try { tickBody(cam, now, meta); } catch (err) {
+    trackLog.errors = (trackLog.errors || 0) + 1;
+    trackLog.lastError = String((err && err.stack) || err).replace(/\s+/g, ' ').slice(0, 400);
+    try { tracker.reset(); } catch { /* nothing more to do */ }
+    if (state.cam === cam) schedule(cam);
+  }
+}
+
+function tickBody(cam, now, meta) {
   if (state.cam !== cam) return;                // the camera was changed: this loop ends
   const v = cam.video;
   const vw = v.videoWidth, vh = v.videoHeight;
@@ -176,11 +187,15 @@ function tick(cam, now, meta) {
         // the map of the plane: one place asked for each LED and each arc, the answers fit the map again (tracker.js). locate() above is how it is
         // found the first time, and again when it is lost
         if (trackOn()) {
+          const ta = performance.now();
           tr = tracker.update({
             maps: { green: [pdiff.P, pdiff.N], amber: [pdiffAmber.P, pdiffAmber.N] }, w: W, h: H, group: state.group, circle: state.circle, motion: Number.isFinite(currentMotion()) ? currentMotion() : 0, t,
             found: { rings: ringsFor(loc.square), row: loc.aligned && loc.aligned.chosen.length >= 3 ? loc.aligned.chosen : null },
           });
           if (tr.state === 'acquire') trackLog.acquisitions++;
+          const tm = performance.now() - ta;
+          trackLog.maxUpdate = Math.max(trackLog.maxUpdate || 0, tm);
+          if (tm > 120) { trackLog.slowUpdates = (trackLog.slowUpdates || 0) + 1; tracker.reset(); }       // a picture the tracker found too slow: the map is dropped, not worked on again
           if (tr.refreshed) trackLog.refreshes++;
           if (tr.state === 'lost' && trackLog.state !== 'lost' && trackLog.state !== 'idle') { trackLog.losses++; const why = tr.lostBy || 'taille'; trackLog.lostBy[why] = (trackLog.lostBy[why] || 0) + 1; }
           trackLog.state = tr.state; trackLog.rotation = tr.rotation; trackLog.last = tr;
@@ -201,6 +216,7 @@ function tick(cam, now, meta) {
       res = finder.find(img.data, W, H, state.threshold, { contrast: state.contrast, radius: Math.max(4, Math.round(W / 80)), ...size });
     }
     const c = performance.now();
+    { const tickMs = c - a; trackLog.maxTick = Math.max(trackLog.maxTick || 0, tickMs); trackLog.sumTick = (trackLog.sumTick || 0) + tickMs; trackLog.nTick = (trackLog.nTick || 0) + 1; if (tickMs > 200) trackLog.slowTicks = (trackLog.slowTicks || 0) + 1; }
     if (state.mask && !res.waiting) {
       if (!diffMode()) finder.paintMask(img.data);
       else { if (lineOn()) pdiff.paintMask(img.data); if (squareOn()) pdiffAmber.paintMask(img.data); }
@@ -292,7 +308,9 @@ function drawSpots(spots, counted, aligned, square, window, tr = null) {
   const k = canvas.width / Math.max(1, canvas.clientWidth);        // canvas pixels per screen pixel
   ctx.lineWidth = 1.5 * k;
   if (tr) {                                                        // the 8 places the map predicts: solid where something answers, dashed where not
+    const near = (q) => q && Number.isFinite(q.x) && Number.isFinite(q.y) && q.x > -canvas.width && q.x < 2 * canvas.width && q.y > -canvas.height && q.y < 2 * canvas.height;      // (never draw to a point that is nowhere)
     for (const o of tr.points) {
+      if (!near(o.px)) continue;
       const ok = !!o.confirmed, here = o.matched && o.inlier !== false, r = Math.max(5 * k, (o.set === 'row' ? 3 : 5) * (tr.scale || 1) + 3 * k);
       ctx.setLineDash(ok ? [] : [3 * k, 3 * k]);
       ctx.strokeStyle = ok ? (o.set === 'ring' ? '#ffb454' : '#3ddc97') : 'rgba(255, 107, 107, 0.9)';
@@ -301,7 +319,7 @@ function drawSpots(spots, counted, aligned, square, window, tr = null) {
       ctx.stroke();
     }
     ctx.setLineDash([]);
-    const pts = (set) => tr.points.filter((o) => o.set === set).map((o) => o.px);
+    const pts = (set) => tr.points.filter((o) => o.set === set && near(o.px)).map((o) => o.px);
     for (const [set, colour, close] of [['row', 'rgba(61, 220, 151, 0.6)', false], ['ring', 'rgba(255, 180, 84, 0.6)', true]]) {
       const p = pts(set);
       if (p.length < 2) continue;
@@ -479,6 +497,7 @@ function report() {
   return [
     'Thymio · test RA · rapport',
     `date: ${new Date().toISOString()}`,
+    `version de la page: ${typeof __BUILD__ === 'string' ? __BUILD__ : 'inconnue'}`,
     `navigateur: ${navigator.userAgent}`,
     `écran: ${innerWidth}x${innerHeight} @${d}`,
     `caméra: ${state.cam ? `${state.cam.label} ${state.cam.settings.width}x${state.cam.settings.height} @${state.cam.settings.frameRate ?? '?'}` : 'non démarrée'}${state.demo ? ' (SCÈNE SIMULÉE)' : ''}`,
@@ -490,6 +509,8 @@ function report() {
     `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
     `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.confirmed}/${win.last.tracker.expected} confirmés dans la dernière période, ${win.last.tracker.matched} répondent dans cette image (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched}), vitesse ${fmt(win.last.tracker.speed, 0)} px/s${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s) dont ${trackLog.refreshes} reprise(s) depuis l'anneau, ${trackLog.losses} perte(s) (${Object.entries(trackLog.lostBy).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucune'}) ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
     ...(state.detect === 'track' ? [`places, quand leur jeu est allumé (réponse fraîche · images · force moyenne de la plus forte réponse proche · écart moyen des réponses aux places prédites en px) : ${Object.entries(tracker.stats).sort(([a], [b]) => a.localeCompare(b)).map(([id, st]) => `${id} ${st.lit ? Math.round((100 * st.hit) / st.lit) : 0} % · ${st.lit} · ${fmt(st.vall / Math.max(1, st.lit), 0)} · ${st.hit ? `${fmt(st.dx / st.hit, 1)},${fmt(st.dy / st.hit, 1)}` : 'n/d'}`).join(' ; ') || 'n/d'} ; force usuelle (rangée/arcs) ${fmt(tracker.signal.green, 0)}/${fmt(tracker.signal.amber, 0)}, seuil plancher ${FLOOR}`] : []),
+    ...(trackLog.errors ? [`ERREURS dans le traitement d'une image : ${trackLog.errors}, la dernière : ${trackLog.lastError}`] : []),
+    ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0} ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
     ...(state.detect === 'track' ? [`dernières images du suivi (état a/t/c/l = acquis/suivi/inertie/perdu, p = attend la rangée, puis rangée et arcs confirmés, x = réponse écartée): ${trackLog.recent.slice(-40).join(' ')}`] : []),
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
@@ -696,6 +717,7 @@ function resetDefaults() {
 $('startBack').onclick = () => start('back');
 $('startFront').onclick = () => start('front');
 $('startDemo').onclick = () => start('demo');
+if ($('buildNote')) $('buildNote').textContent = `version de la page : ${typeof __BUILD__ === 'string' ? __BUILD__ : 'inconnue'}`;
 $('switchCam').onclick = () => start(state.facing === 'user' ? 'back' : 'front');
 $('defaults').onclick = resetDefaults;
 $('lockExposure').onclick = toggleExposure;

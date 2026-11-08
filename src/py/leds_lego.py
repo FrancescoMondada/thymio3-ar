@@ -42,6 +42,19 @@ front = [thymio.LEDS_LEGO_FRONT(i) for i in range(8)]
 back = [thymio.LEDS_LEGO_BACK(i) for i in range(8)]
 ring = [thymio.LEDS_CIRCLE(i) for i in range(8)]
 
+# Every OTHER light of the robot goes out. Behaviors off does not light them or put them out: they stay as the last script or behavior left them.
+# In the photo of the 12th test the four RGB LEDs at the corners glowed magenta and cyan (the pattern of the card mode) and the one under the robot,
+# that shows the colour of the floor, was lit: steady or changing lights, near the row and the ring, in the colours the page looks for.
+# RGB 0..3 the corners, 4 the one under the robot (the colour of the floor), 5 the small one at the back; the 4 LEDs of the buttons; the white
+# LED of the colour sensor; the receiver and the microphone LEDs. (The infrared emitters of the proximity and ground sensors cannot be switched off.)
+for i in range(6):
+    thymio.LEDS_RGB(i).off()
+for i in range(4):
+    thymio.LEDS_BUTTONS(i).off()
+thymio.LED_COLOR().off()
+thymio.LED_RECEIVER().off()
+thymio.LED_MICROPHONE().off()
+
 
 def show(lego, circle):
     # lego, circle: the level (0 or 16) of the Lego LEDs of the group and of the ring LEDs of the set

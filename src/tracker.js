@@ -33,6 +33,7 @@ export const OLD_AGE = 0.2;                     // s: the answers of the map N a
 export const REFRESH_MS = 1000;                 // the ring has not given a full fit (4 arcs) for this long: a full fresh square, if locate.js sees one, replaces the map
 export const PENDING_MS = 2000;                 // a map found from the ring alone must be given its turn (the row says which way round) within this long, or it is dropped
 export const CONFIRM_MS = 450;                  // a place is confirmed if it answered fresh within this long (the sets blink in turn: the one that is dark answered 0.2 s ago)
+export const OUTSIDE_PICTURES = 6;               // the middle of the ring has been outside the picture for this many pictures in a row: the robot is gone, the map is dropped
 export const RING_LOST_MS = 2000;               // ... and for this long: the map is lost (the row alone keeps a map alive by shifts, but cannot say how it is turned)
 
 // the places of the LEDs of the group and of the arcs of the set, in the plane of the robot, for a layout of the row (mirror = +1 or -1)
@@ -71,6 +72,24 @@ function shifted(H, dx, dy) {
   return [H[0] + dx * H[6], H[1] + dx * H[7], H[2] + dx * H[8], H[3] + dy * H[6], H[4] + dy * H[7], H[5] + dy * H[8], H[6], H[7], H[8]];
 }
 
+// Is H the map of a table seen from above? Finite, in front of the camera at every probe place, the places not absurdly far from the picture, a scale that is
+// not absurd and varies by less than 8 across the robot. A map that fails is never kept: the 10th-12th reports had pictures where the places flew far outside the
+// image and the page froze; nothing here may loop on such a map.
+export function validMap(H, w, h) {
+  if (!H || H.length !== 9 || !H.every(Number.isFinite)) return false;
+  const L = Math.max(w, h), scales = [];
+  for (const [X, Y] of [[0, 26], [-28, -7], [28, -7], [0, 52], [26, 26], [-26, 26], [0, 0]]) {
+    if (!(H[6] * X + H[7] * Y + H[8] > 1e-9)) return false;
+    const q = applyH(H, X, Y), sc = scaleAt(H, X, Y);
+    if (!Number.isFinite(q.x) || !Number.isFinite(q.y) || !Number.isFinite(sc)) return false;
+    if (q.x < -0.6 * w || q.x > 1.6 * w || q.y < -0.6 * h || q.y > 1.6 * h) return false;
+    scales.push(sc);
+  }
+  const mid = scales[0];
+  if (!(mid > 0.02 && mid < 0.1 * L)) return false;
+  return scales.every((sc) => sc > mid / 8 && sc < mid * 8);
+}
+
 export class Tracker {
   constructor() {
     this.mirror = 0;                            // 0: not known yet, +1 / -1 once an acquisition has chosen
@@ -90,6 +109,7 @@ export class Tracker {
     this.ringFullT = null;                      // time of the last picture in which the 4 arcs gave a full fit
     this.seen = {};                             // place id -> time of its last fresh answer
     this.dt = 0;
+    this.outside = 0;                           // pictures in a row in which the middle of the ring is outside the picture
     this.pending = null;                        // a map found from the ring alone: which way round it is (the row says) is not known yet
   }
 
@@ -112,11 +132,13 @@ export class Tracker {
     if (t != null) this.t = t;
     this.dt = dt;
     if (this.H && dt > 0) this.H = shifted(this.H, this.v.x * dt, this.v.y * dt);
+    if (this.H && !validMap(this.H, w, h)) { this.H = null; this.coast = 0; this.pending = null; this.lostBy = 'invalide'; this.nInvalid = (this.nInvalid || 0) + 1; }
     if (!this.H) {
       // a map starts from the ring alone, seen in this very picture (the spots of locate.js are as old as the map they came from: up to 0.3 s for the set
       // that is dark, and a hand at 100 px/s moves 30 px in that time): the 4 arcs fix the map up to a quarter turn, and the row, when it is lit, says which
       acquired = this.acquireRing(found, { maps, w, h, circle });
       state = acquired ? 'acquire' : 'lost';
+      if (acquired && !validMap(this.H, w, h)) { this.H = null; acquired = false; this.nInvalid = (this.nInvalid || 0) + 1; }
       if (!acquired) return this.result('lost', [], null);
       this.v = { x: 0, y: 0 }; this.ringT = t; this.fixT = t; this.ringFullT = t; this.pending = { t0: t, n: 0 };
     } else if (found && !this.pending && t != null && this.ringFullT != null && t - this.ringFullT > REFRESH_MS) {
@@ -143,8 +165,8 @@ export class Tracker {
     // the set that is lit now says where the map is: the pattern of its places, slid over the fresh map P, finds the shift at which the most of them answer
     // (the pattern, not the nearest blob of each place: the 4 LEDs of the row are alike and 10 px apart, the nearest blob of a place is often the neighbour's)
     const rows = !this.pending;
-    const snap = this.snap({ maps, w, h, group, circle, speed: Math.hypot(this.v.x, this.v.y), since, rows });
-    if (snap) this.H = shifted(this.H, snap.dx, snap.dy);
+    let snap = this.snap({ maps, w, h, group, circle, speed: Math.hypot(this.v.x, this.v.y), since, rows });
+    if (snap) { const Hs = shifted(this.H, snap.dx, snap.dy); if (validMap(Hs, w, h)) this.H = Hs; else snap = null; }
     this.snapInfo = snap;
     const obs = this.match(this.H, this.mirror || 1, { maps, w, h, group, circle, motion, v: this.v, dt: snap ? 0 : since, rows });
     // Consistency first. With 4 points a map has no redundancy (any 4 points fit exactly): one stray blob in a window would be accepted and
@@ -193,15 +215,16 @@ export class Tracker {
       dx /= fresh.length; dy /= fresh.length;
       if (Math.hypot(dx, dy) < 12 * s0 + 2) { this.H = shifted(this.H, dx, dy); updated = true; }
     }
+    if (updated && !validMap(this.H, w, h)) { this.H = before; updated = false; rms = null; ringFixed = false; this.nInvalid = (this.nInvalid || 0) + 1; }
     this.diag = { hit: hit.length, fresh: fresh.length, freshRing: freshRing.length, freshRow: fresh.length - freshRing.length, rejected: obs.filter((o) => o.rejected).length, how: updated ? (freshRing.length >= 4 && obs.some((o) => o.inlier) ? 'fit' : freshRing.length >= 3 ? 'affine' : 'shift') : 'none', coast: this.coast, motion };
     if (updated) {
       this.coast = 0;
       if (ringFixed && t != null) this.ringT = t;
       if (t != null) this.fixT = t;
       // what the picture says about the speed: how far the map had to move from where it was predicted (alpha-beta)
-      if (dt > 0.005 && !acquired) {
+      if (dt > 0.02 && !acquired) {
         const a = applyH(before, 0, 26), b = applyH(this.H, 0, 26);
-        const vx = this.v.x + (TUNE.beta * (b.x - a.x)) / dt, vy = this.v.y + (TUNE.beta * (b.y - a.y)) / dt, sp = Math.hypot(vx, vy), cap = 12 * w;
+        const vx = this.v.x + (TUNE.beta * (b.x - a.x)) / dt, vy = this.v.y + (TUNE.beta * (b.y - a.y)) / dt, sp = Math.hypot(vx, vy), cap = 1.2 * Math.max(w, h);
         this.v = sp > cap ? { x: (vx * cap) / sp, y: (vy * cap) / sp } : { x: vx, y: vy };
       }
       for (const o of hit) this.signal[o.colour] = Math.min(255, 0.9 * this.signal[o.colour] + 0.1 * o.v);
@@ -232,6 +255,12 @@ export class Tracker {
       if (answers && o.blob.map === 0 && t != null) this.seen[o.id] = t;
       o.confirmed = t != null ? this.H != null && this.seen[o.id] != null && t - this.seen[o.id] <= CONFIRM_MS : answers;
     }
+    // a map that has left the picture (the places flew off, or the phone was turned away) is not kept: its places and the lines drawn between them would be nowhere
+    if (this.H) {
+      const c = applyH(this.H, 0, 26);
+      this.outside = c.x < -10 || c.x > w + 10 || c.y < -10 || c.y > h + 10 ? this.outside + 1 : 0;
+      if (this.outside >= OUTSIDE_PICTURES) { this.H = null; this.coast = 0; state = 'lost'; this.lostBy = 'hors image'; this.pending = null; this.outside = 0; }
+    }
     // the ring has not corrected the map for too long: the row alone has kept it alive by shifts, but nothing says it is still the right map
     if (this.H && t != null && this.ringT != null && t - this.ringT > RING_LOST_MS) { this.H = null; this.coast = 0; state = 'lost'; this.lostBy = 'ring'; this.pending = null; }
     // lost only after 8 pictures with no correction (a picture or two with too few answers is a coast, not a loss: the map is kept as it was)
@@ -252,6 +281,7 @@ export class Tracker {
       const places = pts.filter((p) => p.set === set).map((p) => ({ ...p, px: applyH(this.H, p.X, p.Y), s: scaleAt(this.H, p.X, p.Y) }));
       if (places.length < 3) continue;
       const s0 = places.reduce((a, p) => a + p.s, 0) / places.length, colour = places[0].colour;
+      if (!Number.isFinite(s0) || s0 <= 0 || s0 > 80) continue;
       const tau = Math.max(FLOOR, TAU_SHARE * this.signal[colour]), cap = Math.max(2 * tau, 1.2 * this.signal[colour]);
       const reach = Math.min(set === 'row' ? 1.4 * ROW_GAP * s0 : 33 * s0, ((set === 'row' ? 6 : 10) * s0 + 2) + TUNE.reachK * speed * since);
       const top = slide(maps[colour][0], w, h, places, { tau, cap, reach });
@@ -271,6 +301,7 @@ export class Tracker {
       const Hk = rot ? compose(this.H, planeRotation(rot)) : this.H;
       const places = expectedPoints({ group, circle: -1, mirror }).map((p) => ({ px: applyH(Hk, p.X, p.Y), s: scaleAt(Hk, p.X, p.Y) }));
       const s0 = places.reduce((a, p) => a + p.s, 0) / places.length;
+      if (!Number.isFinite(s0) || s0 <= 0 || s0 > 80) continue;
       const reach = Math.min(1.4 * ROW_GAP * s0, 6 * s0 + 5 + TUNE.reachK * speed * since);
       const top = slide(P, w, h, places, { tau, cap, reach });
       if (top && top.count >= 2) opts.push({ ...top, mirror, rot, H: Hk, d: Math.hypot(top.dx, top.dy) });
@@ -295,7 +326,7 @@ export class Tracker {
     for (const p of expectedPoints({ group, circle, mirror }).filter((q) => rows || q.set !== 'row')) {
       const px = applyH(H, p.X, p.Y), s = scaleAt(H, p.X, p.Y);
       const base = ((p.set === 'row' ? 6 : 10) + 0.05 * motion) * s + 2;
-      const r = base + 0.3 * speed * dt, ro = base + 0.15 * speed;
+      const rMax = 0.3 * Math.max(w, h), r = Math.min(rMax, base + 0.3 * speed * dt), ro = Math.min(rMax, base + 0.15 * speed);
       const tau = Math.max(FLOOR, TAU_SHARE * this.signal[p.colour]);
       // P is where the set IS (fresh), N where it WAS. The real maps are the max over several older pictures, so a set that is lit now shows in N too,
       // at the place it had in an older picture of the same phase, and about as strong: when both answer, the fresh one is taken. A set that has just
@@ -307,10 +338,10 @@ export class Tracker {
       else if (old) blob = { ...old, map: 1 };
       obs.push({ ...p, px, r, blob, matched: !!blob && blob.v >= tau, v: blob ? blob.v : 0 });
     }
-    // two places never share an answer: where the radius of an old answer reaches the neighbour (the LEDs of the row are 10 px apart at 70 cm), the
-    // blob belongs to the nearer place
+    // two places never share an answer (a big glow between two arcs, the radius of an old answer reaching the neighbour: the LEDs of the row are 10 px apart
+    // at 70 cm): the blob belongs to the nearer place. Two places on one blob would make a fit that 4 points satisfy and that is not a map.
     for (const a of obs) for (const b of obs) {
-      if (a === b || !a.matched || !b.matched || a.blob.map !== 1 || b.blob.map !== 1) continue;
+      if (a === b || !a.matched || !b.matched || a.blob.map !== b.blob.map) continue;
       if (Math.hypot(a.blob.x - b.blob.x, a.blob.y - b.blob.y) > 1.5) continue;
       const da = Math.hypot(a.blob.x - a.px.x, a.blob.y - a.px.y), db = Math.hypot(b.blob.x - b.px.x, b.blob.y - b.px.y);
       if (da > db || (da === db && a.id > b.id)) a.matched = false;
@@ -322,7 +353,7 @@ export class Tracker {
     const row = obs.filter((o) => o.set === 'row'), ringPts = obs.filter((o) => o.set === 'ring');
     const ok = (o) => o.matched && o.inlier !== false;
     return {
-      state, tracking: !!this.H && state !== 'lost', H: this.H, mirror: this.mirror, rotation: this.rotation, rms, speed: Math.hypot(this.v.x, this.v.y), pending: !!this.pending, refreshed: !!this.refreshed, lostBy: state === 'lost' ? this.lostBy || null : null,
+      state, tracking: !!this.H && state !== 'lost', H: this.H, mirror: this.mirror, rotation: this.rotation, rms, speed: Math.hypot(this.v.x, this.v.y), invalid: this.nInvalid || 0, pending: !!this.pending, refreshed: !!this.refreshed, lostBy: state === 'lost' ? this.lostBy || null : null,
       scale: this.H ? scaleAt(this.H, 0, 26) : NaN, points: obs,
       expected: obs.length, matched: obs.filter(ok).length, rowMatched: row.filter(ok).length, ringMatched: ringPts.filter(ok).length,
       confirmed: obs.filter((o) => o.confirmed).length, rowConfirmed: row.filter((o) => o.confirmed).length, ringConfirmed: ringPts.filter((o) => o.confirmed).length,
@@ -352,6 +383,9 @@ export class Tracker {
 
 // the map slid: the shift (within `reach` px) at which the places have the most under them in the picture P (see Tracker.snap). places: [{ px: {x, y} }]
 export function slide(P, w, h, places, { tau, cap, reach }) {
+  // bounded whatever it is given: a reach from a map that went wrong must not turn into a loop of millions of shifts
+  if (!(reach > 0) || !places.length || !places.every((p) => Number.isFinite(p.px.x) && Number.isFinite(p.px.y))) return null;
+  reach = Math.min(reach, 0.2 * Math.max(w, h), 80);
   const R = Math.max(2, Math.ceil(reach));
   const peak = (x, y) => {
     const cx = Math.round(x), cy = Math.round(y);
@@ -360,14 +394,18 @@ export function slide(P, w, h, places, { tau, cap, reach }) {
     return m;
   };
   let top = null;
-  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+  const consider = (dx, dy) => {
     const d = Math.hypot(dx, dy);
-    if (d > reach) continue;
+    if (d > reach) return;
     let score = 0, count = 0;
     for (const p of places) { const v = peak(p.px.x + dx, p.px.y + dy); score += Math.min(v, cap) / cap; if (v >= tau) count++; }
     score -= 0.2 * (d / reach);
     if (!top || score > top.score) top = { dx, dy, count, score };
-  }
+  };
+  // every other shift first (the window of a place tolerates 1 px), then the neighbours of the best, and the shift 0 (the nearest wins a tie)
+  for (let dy = -R; dy <= R; dy += 2) for (let dx = -R; dx <= R; dx += 2) consider(dx, dy);
+  consider(0, 0);
+  if (top) { const c = top; for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) if (ox || oy) consider(c.dx + ox, c.dy + oy); }
   return top;
 }
 
