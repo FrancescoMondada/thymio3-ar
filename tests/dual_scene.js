@@ -19,6 +19,7 @@ function paint(map, w, h, cx, cy, sigma, amp) {
 }
 
 // path(tMs) -> { elev, azim, dist }.  shift(tMs) -> { x, y } (px of the 1280-wide frame): the picture swaying in the hand.
+// ringAmp: one strength for the arcs, or [flash 0, flash 1] (the two sets differ: the 16th report had arcs of 95 to 155)
 // holes: [{ X, Y, Z, set: 'row' | 'ring', phase, amp }]: a light that comes out of a hole in the side wall (Z below the top plane) with its flash
 export function makeDualScene({ w = 640, path, mirror = 1, rowOffset = 0, rowZ = 0, rowAmp = 100, ringAmp = 160, rowGains = null, dropArcs = [], distractors = 3, distractorAmp = 70, seed = 1, shift = null, holes = [] }) {
   const h = Math.round((w * 720) / FRAME_W), k = w / FRAME_W, rnd = rng(seed);
@@ -37,7 +38,7 @@ export function makeDualScene({ w = 640, path, mirror = 1, rowOffset = 0, rowZ =
       if (p.set !== set || p.phase !== phase) continue;
       const q = placePx(t, p);
       if (set === 'row') paint(map, w, h, q.x, q.y, Math.max(0.9, 2.2 * ppm), rowAmp * (rowGains ? rowGains[p.j] : 1));
-      else if (!dropArcs.includes(p.arc)) paint(map, w, h, q.x, q.y, Math.max(1.2, 4 * ppm), ringAmp);
+      else if (!dropArcs.includes(p.arc)) paint(map, w, h, q.x, q.y, Math.max(1.2, 4 * ppm), Array.isArray(ringAmp) ? ringAmp[p.phase] : ringAmp);
     }
   }
   function frame(t) {

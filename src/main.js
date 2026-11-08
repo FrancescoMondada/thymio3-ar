@@ -16,7 +16,8 @@ import { Timeline } from './timeline.js';
 import { nextSize } from './autosize.js';
 import { Tracker, FLOOR } from './tracker.js';
 import { RangeGuide, RANGE, normalise } from './range.js';
-import { ROW_GAP } from './layout.js';
+import { searchThreshold } from './search.js';
+import { ROW_GAP, discWindow } from './layout.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript, isDual } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
 
@@ -122,6 +123,36 @@ function schedule(cam) {
   else requestAnimationFrame((now) => tick(cam, now, {}));
 }
 
+// The threshold of the search for the first map (dual flash): src/search.js
+const peakHist = { line: [], ring: [] };
+function searchFor(kind, pd, asked, floor, win = null) {
+  let m = 0;
+  const P = pd.P, w = pd.w;
+  if (win) {                                                         // only the plausible zone counts: a light elsewhere does not set the threshold
+    const x0 = Math.max(0, Math.floor(win.bbox.x0)), x1 = Math.min(w - 1, Math.ceil(win.bbox.x1)), y0 = Math.max(0, Math.floor(win.bbox.y0)), y1 = Math.min(pd.h - 1, Math.ceil(win.bbox.y1));
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (P[y * w + x] > m) m = P[y * w + x];
+  } else for (let i = 0; i < P.length; i++) if (P[i] > m) m = P[i];
+  const st = searchThreshold(peakHist[kind], m, asked, floor);
+  trackLog[kind === 'ring' ? 'thrRing' : 'thrRow'] = st.thr;
+  return { ...st, peak: m };
+}
+
+// The search for the first map goes down a ladder of thresholds (the first from the strength of the lights, then 0.7 and 0.5 of it, not under the floor) until what it finds
+// holds what it looks for: a square of arcs, three LEDs in line. A strong light in the picture that moves (a lamp in the background) makes the first threshold too high for the
+// arcs, which the lower ones find; the candidates and the check against the row then sort the spots out. After a loss it looks only in the zone where the robot was (win).
+function ladderFind(kind, pd, asked, floor, size, enough, win = null) {
+  const st = searchFor(kind, pd, asked, floor, win);
+  if (st.quiet) return { spots: [], peak: st.peak };
+  const ladder = [...new Set([st.thr, Math.round(0.7 * st.thr), Math.round(0.5 * st.thr)].map((v) => Math.max(floor, v)))];
+  let spots = [];
+  for (const thr of ladder) {
+    spots = pd.find(thr, size, win, 'P').spots;
+    trackLog[kind === 'ring' ? 'thrRing' : 'thrRow'] = thr;
+    if (enough(spots)) break;
+  }
+  return { spots, peak: st.peak };
+}
+
 // An exception in one picture must not end the loop (the display would stop, as if the page had frozen): it is counted, kept for the report, the map is dropped,
 // and the next picture is waited for.
 function tick(cam, now, meta) {
@@ -171,20 +202,26 @@ function tickBody(cam, now, meta) {
       const spots = [];
       // the map is known and healthy: the spots of the whole picture are not looked for (they cost most of the time of a picture, and a light out of a hole in the side of the
       // body is a spot like a LED): the maps of the pair difference are all the tracker needs, and the strongest response is read off them
-      const dualOn = isDual(state.group, state.circle);                // both sets lit in the same flash: what lights up now (P) is all that is looked at
+      const dualOn = isDual(state.group, state.circle);
+      // after a loss the robot is looked for where it was (tracker.searchZone), not in the whole picture
+      const zone = dualOn && trackOn() && !tracker.H ? tracker.searchZone(t, W, H) : null, zoneWin = zone ? discWindow({ x: zone.cx, y: zone.cy }, zone.r) : null;
+      trackLog.zone = zone;
+      if (dualOn && trackOn() && !tracker.H) { trackLog.searches = (trackLog.searches || 0) + 1; if (zone) trackLog.zoned = (trackLog.zoned || 0) + 1; }                // both sets lit in the same flash: what lights up now (P) is all that is looked at
       const lite = trackOn() && !!tracker.H && !tracker.wantsFound(t);
       trackLog.pictures = (trackLog.pictures || 0) + 1; if (lite) trackLog.lite = (trackLog.lite || 0) + 1;
       const mapPeak = (pd) => { let m = 0; const P = pd.P, N = pd.N; for (let i = 0; i < P.length; i++) { if (P[i] > m) m = P[i]; if (N[i] > m) m = N[i]; } return m; };
       if (lineOn()) {
         if (pdiff.push(img.data, W, H, t)) {
           if (lite) { peakLine = mapPeak(pdiff); brightest = Math.max(brightest, peakLine); }
-          else { const r = pdiff.find(state.blinkThreshold, size, null, dualOn ? 'P' : null); spots.push(...tag(r.spots, 'line')); peakLine = r.peak; brightest = Math.max(brightest, r.peak); }
+          else if (dualOn) { const st = ladderFind('line', pdiff, state.blinkThreshold, 25, size, (sp) => pickAligned(sp, { minGap: Math.max(3, 0.007 * longSide) }).chosen.length >= 3, zoneWin); peakLine = st.peak; brightest = Math.max(brightest, st.peak); spots.push(...tag(st.spots, 'line')); }
+          else { const r = pdiff.find(state.blinkThreshold, size, null, null); spots.push(...tag(r.spots, 'line')); peakLine = r.peak; brightest = Math.max(brightest, r.peak); }
         } else waiting = true;
       }
       if (squareOn()) {
         if (pdiffAmber.push(img.data, W, H, t)) {
           if (lite) { peakRing = mapPeak(pdiffAmber); brightest = Math.max(brightest, peakRing); }
-          else { const r = pdiffAmber.find(state.ringThreshold, arcSize, null, dualOn ? 'P' : null); spots.push(...tag(r.spots, 'ring')); peakRing = r.peak; brightest = Math.max(brightest, r.peak); }
+          else if (dualOn) { const st = ladderFind('ring', pdiffAmber, state.ringThreshold, 35, arcSize, (sp) => sp.length >= 4 && pickSquare(sp, { minSide: Math.max(5, 0.012 * longSide), maxCandidates: 20 }).full, zoneWin); peakRing = st.peak; brightest = Math.max(brightest, st.peak); spots.push(...tag(st.spots, 'ring')); }
+          else { const r = pdiffAmber.find(state.ringThreshold, arcSize, null, null); spots.push(...tag(r.spots, 'ring')); peakRing = r.peak; brightest = Math.max(brightest, r.peak); }
         } else waiting = true;
       }
       res = waiting ? { spots: [], brightest: 0, lit: 0, waiting: true } : { spots, brightest, lit: 0 };
@@ -352,6 +389,14 @@ function drawSpots(spots, counted, aligned, square, window, tr = null) {
       ctx.stroke();
     }
     return;
+  }
+  if (trackLog.zone) {                                              // where the robot is looked for after a loss: round where it was (dashed)
+    ctx.setLineDash([4 * k, 4 * k]);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+    ctx.beginPath();
+    ctx.arc(trackLog.zone.cx, trackLog.zone.cy, trackLog.zone.r, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
   if (window) {                                                    // where the other set said this one must be (dashed)
     ctx.setLineDash([5 * k, 5 * k]);
@@ -533,7 +578,7 @@ function report() {
     ...(state.detect === 'track' ? [`places, quand leur jeu est allumé (réponse fraîche · images · force moyenne de la plus forte réponse proche · écart moyen des réponses aux places prédites en px) : ${Object.entries(tracker.stats).sort(([a], [b]) => a.localeCompare(b)).map(([id, st]) => `${id} ${st.lit ? Math.round((100 * st.hit) / st.lit) : 0} % · ${st.lit} · ${fmt(st.vall / Math.max(1, st.lit), 0)} · ${st.hit ? `${fmt(st.dx / st.hit, 1)},${fmt(st.dy / st.hit, 1)}` : 'n/d'}`).join(' ; ') || 'n/d'} ; force usuelle (rangée/arcs) ${fmt(tracker.signal.green, 0)}/${fmt(tracker.signal.amber, 0)}, seuil plancher ${FLOOR}`] : []),
     ...(trackLog.errors ? [`ERREURS dans le traitement d'une image : ${trackLog.errors}, la dernière : ${trackLog.lastError}`] : []),
     ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0}, recherche sur toute l'image évitée dans ${fmt((100 * (trackLog.lite || 0)) / Math.max(1, trackLog.pictures || 0), 0)} % des images ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
-    ...(state.detect === 'track' ? [`départ : premier clignotement vu ${trackLog.firstSeenT != null ? `après ${fmt((trackLog.firstSeenT - trackLog.t0) / 1000, 1)} s` : 'jamais'}, première carte ${trackLog.firstMapT != null ? `après ${fmt((trackLog.firstMapT - trackLog.t0) / 1000, 1)} s` : 'jamais'}${trackLog.firstSeenT != null && trackLog.firstMapT != null ? ` (${fmt((trackLog.firstMapT - trackLog.firstSeenT) / 1000, 1)} s après le premier clignotement)` : ''}, depuis le début de l'analyse`] : []),
+    ...(state.detect === 'track' ? [`départ : premier clignotement vu ${trackLog.firstSeenT != null ? `après ${fmt((trackLog.firstSeenT - trackLog.t0) / 1000, 1)} s` : 'jamais'}, première carte ${trackLog.firstMapT != null ? `après ${fmt((trackLog.firstMapT - trackLog.t0) / 1000, 1)} s` : 'jamais'}${trackLog.firstSeenT != null && trackLog.firstMapT != null ? ` (${fmt((trackLog.firstMapT - trackLog.firstSeenT) / 1000, 1)} s après le premier clignotement)` : ''}, depuis le début de l'analyse ; seuils de la dernière recherche de carte : arcs ${trackLog.thrRing ?? 'n/d'}, LED ${trackLog.thrRow ?? 'n/d'} ; recherche limitée à la zone où était le robot dans ${trackLog.searches ? fmt((100 * (trackLog.zoned || 0)) / trackLog.searches, 0) : 0} % des ${trackLog.searches || 0} images de recherche`] : []),
     ...(state.detect === 'track' ? [`distance (échelle de la carte ramenée à 640 px de côté long ; trop loin sous ${RANGE.far}, trop près au-dessus de ${RANGE.near} px/mm) : trop loin ${fmt(100 * rangeGuide.summary().far, 0)} %, bon ${fmt(100 * rangeGuide.summary().ok, 0)} %, trop près ${fmt(100 * rangeGuide.summary().near, 0)} % des images avec carte ; échelle avant les dernières pertes : ${trackLog.lossScales.map((v) => v ?? '?').join(' ') || 'aucune'} ; départs refusés : ${Object.entries(trackLog.acqFails).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucun'}${trackLog.lastAcq && trackLog.lastAcq.err != null ? ` (dernier : écart de la rangée ${fmt(trackLog.lastAcq.err, 2)} pas, marge ${Number.isFinite(trackLog.lastAcq.margin) ? fmt(trackLog.lastAcq.margin, 2) : 'n/d'})` : ''}`] : []),
     ...(state.detect === 'track' ? [`dernières images du suivi (état a/t/c/l = acquis/suivi/inertie/perdu, p = attend la rangée, puis rangée et arcs confirmés, x = réponse écartée): ${trackLog.recent.slice(-40).join(' ')}`] : []),
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,

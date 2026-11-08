@@ -161,6 +161,59 @@ test('pickAligned and pickSquare give their best few different candidates on req
   assert.equal(pickAligned([]).candidates, undefined);
 });
 
+test('the arcs of the two flashes differ in strength (155 and 95: the 16th report) and the exposure changes: the usual strength follows, no arc is refused for being strong, no weak one pulls the others', () => {
+  const { out, tr } = run(makeDualScene({ path: path(), shift: swayShift(40), ringAmp: [160, 95] }), { frames: 14 * 40 });
+  assert.equal(acquisitions(out), 1);
+  assert.ok(share(out, (o) => o.ringConfirmed === 4) >= 0.97, `all 4 arcs of the lit flash confirmed in ${pct(share(out, (o) => o.ringConfirmed === 4))}`);
+  assert.ok(tr.signal.amber >= 85 && tr.signal.amber <= 170, `usual strength of the arcs ${tr.signal.amber.toFixed(0)}`);
+  // the lights get dimmer by half, then brighter again: the strength follows, nothing is lost
+  const dim = makeDualScene({ path: path(), shift: swayShift(40), ringAmp: [70, 45], rowAmp: 45 }), bright = makeDualScene({ path: path(), shift: swayShift(40), ringAmp: [200, 150] });
+  const t0 = out[out.length - 1].t + 60, step = (scene, from, n) => { const o = []; for (let i = 0; i < n; i++) { const t = from + i * 70, f = scene.frame(t); o.push(tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: scene.found(t), motion: 8, t })); } return o; };
+  const d = step(dim, t0, 14 * 12), b = step(bright, t0 + 14 * 12 * 70, 14 * 12);
+  assert.ok(d.slice(20).every((r) => r.tracking), 'followed through the dimming');
+  assert.ok(tr.signal.amber > 120, 'and back up');
+  assert.ok(b.slice(20).filter((r) => r.ringConfirmed === 4).length / b.slice(20).length >= 0.95, 'every arc of the bright lights is confirmed (none refused as too strong)');
+});
+
+test('a row with ONE arc does not determine the map: no joint fit is made of it (the 16th report: 72 absurd maps), the map is kept and corrected by what it can', () => {
+  const full = makeDualScene({ path: path(), shift: swayShift(30) }), poor = makeDualScene({ path: path(), shift: swayShift(30), dropArcs: [2, 4, 6, 3, 5, 7] }), tr = new Tracker();
+  const a = run(full, { frames: 30, tracker: tr });
+  assert.equal(acquisitions(a.out), 1);
+  const out = [];
+  for (let i = 0; i < 40; i++) {
+    const t = a.out[29].t + 70 * (i + 1), f = poor.frame(t);
+    out.push(tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: null, motion: 8, t }));
+  }
+  assert.equal(out[out.length - 1].invalid, 0, 'no absurd map was made');
+  assert.ok(out.slice(0, 8).every((r) => r.tracking), 'kept while it lasts');
+});
+
+test('after a loss the robot is looked for round where it was (a light in the background must do nothing): a disc that grows with the time, everywhere again after 6 s or when it is half the picture', () => {
+  const scene = makeDualScene({ path: path(), shift: swayShift(20) }), tr = new Tracker();
+  assert.equal(tr.searchZone(T0, 640, 360), null, 'never mapped: everywhere');
+  const { out } = run(scene, { frames: 40, tracker: tr });
+  const last = out[out.length - 1], c = applyH(last.H, 0, 26);
+  assert.equal(tr.searchZone(last.t, 640, 360), null, 'a map now: nothing to look for');
+  // the lights go out: the map is kept a few pictures, then lost
+  let t = last.t, lostAt = null;
+  for (let i = 0; i < 20; i++) {
+    t += 70;
+    const f = scene.frame(t), blank = { green: [new Uint8Array(f.w * f.h), new Uint8Array(f.w * f.h)], amber: [new Uint8Array(f.w * f.h), new Uint8Array(f.w * f.h)] };
+    const r = tr.update({ maps: blank, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: null, motion: 0, t });
+    if (r.state === 'lost' && lostAt === null) lostAt = t;
+  }
+  assert.ok(lostAt !== null, 'lost');
+  const z1 = tr.searchZone(t, 640, 360), z2 = tr.searchZone(t + 1500, 640, 360), z3 = tr.searchZone(t + 3500, 640, 360);
+  assert.ok(z1 && Math.hypot(z1.cx - c.x, z1.cy - c.y) < 40, `centred near the last place (${z1 && Math.hypot(z1.cx - c.x, z1.cy - c.y).toFixed(0)} px off)`);
+  assert.ok(z1.r > 30 && z1.r < 0.5 * 640, `a disc of ${z1.r.toFixed(0)} px`);
+  assert.ok(z2 === null || z2.r > z1.r, 'it grows with the time lost');
+  assert.equal(tr.searchZone(t + 7000, 640, 360), null, 'after 6 s: everywhere');
+  assert.ok(z3 === null || z3.r >= (z2 ? z2.r : 0));
+  // the same zone in a picture of another size (a change of the analysed size): the same place, scaled
+  const small = tr.searchZone(t, 480, 270);
+  assert.ok(Math.abs(small.cx - z1.cx * 0.75) < 1 && Math.abs(small.cy - z1.cy * 0.75) < 1 && Math.abs(small.r - z1.r * 0.75) < 1, 'follows the size');
+});
+
 test('a refused start says why: no square, no row, a row that does not fit', () => {
   const scene = makeDualScene({ path: path() }), f = scene.frame(T0), found = scene.found(T0), mk = () => new Tracker();
   const go = (tr, fd) => tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: fd, motion: 0, t: T0 });

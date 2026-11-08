@@ -143,7 +143,7 @@ export class PairDiff {
   // only: 'P' looks at what lights up NOW only (the dual flash: the row and the ring are lit together, both fresh; the map N would give the other flash, 0.1 to
   // 0.3 s old, which is a different place of the robot)
   find(threshold, size, window = null, only = null) {
-    if (window) return this.findIn(threshold, size, window);
+    if (window) return this.findIn(threshold, size, window, only);
     const rp = this.pf.findFromValues(this.P, this.w, this.h, threshold, size);
     const rn = only === 'P' ? { spots: [], brightest: 0 } : this.nf.findFromValues(this.N, this.w, this.h, threshold, size);
     const useP = rp.spots.length >= rn.spots.length;
@@ -152,7 +152,7 @@ export class PairDiff {
     return { ...(useP ? rp : rn), source: this.source, peak: Math.max(rp.brightest, rn.brightest) };
   }
 
-  findIn(threshold, size, window) {
+  findIn(threshold, size, window, only = null) {
     const { w, h } = this, n = w * h;
     if (!this.Pm) { this.Pm = new Uint8Array(n); this.Nm = new Uint8Array(n); }
     const { Pm, Nm, P, N } = this;
@@ -171,7 +171,7 @@ export class PairDiff {
       }
     }
     const rp = this.pf2.findFromValues(Pm, w, h, threshold, size);
-    const rn = this.nf2.findFromValues(Nm, w, h, threshold, size);
+    const rn = only === 'P' ? { spots: [], brightest: 0 } : this.nf2.findFromValues(Nm, w, h, threshold, size);
     const useP = rp.spots.length >= rn.spots.length;
     return { ...(useP ? rp : rn), source: useP ? 'P' : 'N', windowed: true, peak: Math.max(rp.brightest, rn.brightest) };
   }

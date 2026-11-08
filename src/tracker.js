@@ -27,13 +27,14 @@ import { blobNear } from './evidence.js';
 import { ring, legoPoint, rowName, ROW_GAP, SQUARE_SIDE } from './layout.js';
 
 export const FLOOR = 20;                        // a response under this is noise (0..255)
-export const HI_SHARE = 2.2;                    // a response above this many times the usual strength of its set is not a LED of it (a light out of a hole in the side of the body)
+export const HI_SHARE = 4;                      // a response above this many times the usual strength of its colour is not a LED (a light out of a hole in the side of the body, a reflection)
 export const TAU_SHARE = 0.2;                   // a place answers when its response is this share of the usual strength of its set (LEDs of a row differ a lot)
 export const TUNE = { beta: 0.7, reachK: 0.8 };   // beta: how much of what a picture says about the speed of the map is taken (alpha-beta filter); reachK: the share of speed x time the search reach carries
 export const OLD_AGE = 0.2;                     // s: the answers of the map N are 0.08 to 0.32 s old (pairdiff.js: references aged 0.4 to 1.6 half periods)
 export const REFRESH_MS = 1000;                 // the ring has not given a full fit (4 arcs) for this long: a full fresh square, if locate.js sees one, replaces the map
 export const PENDING_MS = 2000;                 // a map found from the ring alone must be given its turn (the row says which way round) within this long, or it is dropped
 export const CONFIRM_MS = 450;                  // a place is confirmed if it answered fresh within this long (the sets blink in turn: the one that is dark answered 0.2 s ago)
+export const ZONE_MEMORY_S = 6;                 // after a loss the robot is looked for round where it was for this long; then everywhere
 export const OUTSIDE_PICTURES = 6;               // the middle of the ring has been outside the picture for this many pictures in a row: the robot is gone, the map is dropped
 export const RING_LOST_MS = 2000;               // ... and for this long: the map is lost (the row alone keeps a map alive by shifts, but cannot say how it is turned)
 
@@ -105,6 +106,13 @@ export class Tracker {
   constructor() {
     this.mirror = 0;                            // 0: not known yet, +1 / -1 once an acquisition has chosen
     this.stats = {};                            // per place, over the whole session: see below (the report)
+    // how strong the lights answer in this view (0..255): the MEDIAN of the last 80 fresh answers of each colour. It belongs to the lights and the exposure, not to a map,
+    // so a new map keeps it. (An average pulled by weak strays, or a decay with a ceiling at a multiple of it, drifted down in the 16th test to 52 for arcs of 95 to 155: the
+    // ceiling then refused the stronger arcs, which cannot pull it back.)
+    this.signal = { green: 120, amber: 90 };
+    this.known = { green: false, amber: false };
+    this.vals = { green: [], amber: [] };
+    this.lastMap = null;                        // where the robot was in the picture the last time the map held (relative to the picture: it survives a change of size)
     this.reset();
   }
 
@@ -112,8 +120,6 @@ export class Tracker {
     this.H = null;
     this.coast = 0;
     this.rotation = null;
-    this.signal = { green: 120, amber: 90 };    // how strong the sets answer: the floor follows
-    this.known = { green: false, amber: false };   // whether the strength above was measured on this robot in this view (until then nothing is refused for being too strong)
     this.v = { x: 0, y: 0 };                    // how fast the map moves in the picture (px/s): the places are predicted with it
     this.t = null;                              // time of the last picture (ms)
     this.ringT = null;                          // time of the last picture in which the ring corrected the map
@@ -123,6 +129,26 @@ export class Tracker {
     this.dt = 0;
     this.outside = 0;                           // pictures in a row in which the middle of the ring is outside the picture
     this.pending = null;                        // a map found from the ring alone: which way round it is (the row says) is not known yet
+  }
+
+  // The robot is where it was: a map that is lost does not mean the robot went away, the phone moved a little. Where to look for it (the spots of the whole picture are
+  // what a light in the background, a lamp, a reflection spoils): a disc round the last place of the middle of the ring, as big as the top of the robot (60 mm each way) with
+  // a margin, growing with the time since the map was lost (a hand moves the picture by about 120 px a second, at 640 px), carried a little by the speed the map had. Null:
+  // look everywhere (never mapped, a map now, lost for more than 6 s, or the disc has grown to half the picture). -> { cx, cy, r } in px of the picture w x h
+  searchZone(t, w, h) {
+    const m = this.lastMap;
+    if (!m || this.H || t == null || m.t == null) return null;
+    const dt = (t - m.t) / 1000;
+    if (dt < 0 || dt > ZONE_MEMORY_S) return null;
+    const L = Math.max(w, h), drift = Math.min(dt, 0.6), r = m.r * L + 0.06 * L + 0.19 * L * dt;
+    if (!(r < 0.5 * L)) return null;
+    return { cx: (m.cx + m.vx * drift) * w, cy: (m.cy + m.vy * drift) * h, r };
+  }
+
+  rememberMap(w, h, t) {
+    const c = applyH(this.H, 0, 26), s0 = scaleAt(this.H, 0, 26);
+    if (!Number.isFinite(c.x) || !Number.isFinite(c.y) || !(s0 > 0)) return;
+    this.lastMap = { t, cx: c.x / w, cy: c.y / h, r: (70 * s0) / Math.max(w, h), vx: this.v.x / w, vy: this.v.y / h };
   }
 
   // Does the page need the spots of the whole picture (locate.js) for this picture? Not while the map is known and healthy: the places are asked where they are
@@ -225,7 +251,11 @@ export class Tracker {
     const freshRing = fresh.filter((o) => o.set === 'ring');
     // a correction of the map as rich as the fresh answers allow: the whole map (4 points or more, RANSAC), an affine correction (3 points not on a
     // line: the ring with one arc missing), or a shift (the row: 3 or 4 points on a line)
-    if (dual && fresh.length >= 5) {
+    const freshRow = fresh.filter((o) => o.set === 'row');
+    // the points must DETERMINE the map: the ring alone (4 arcs), or the row (3 or 4 LEDs, on a line: worth 5 of the 8 numbers of the map) with 2 arcs, or 3 arcs with 2 LEDs.
+    // A row with ONE arc is 7 numbers of 8: the fit gives something, and what it gives is absurd (the 16th report: 72 maps refused for it)
+    const determined = freshRing.length >= 4 || (freshRow.length >= 3 && freshRing.length >= 2) || (freshRing.length >= 3 && freshRow.length >= 2);
+    if (dual && determined && fresh.length >= 5) {
       // the dual flash: the row AND the ring are lit in the same flash, 8 points that are not on a line: the whole map from this one picture, with 4 points more than it needs,
       // so that a stray answer (a light out of a hole in the side of the body) is the one that does not fit
       const src = fresh.map((o) => ({ x: o.X, y: o.Y })), dst = fresh.map((o) => ({ x: o.blob.x, y: o.blob.y }));
@@ -270,17 +300,15 @@ export class Tracker {
         const vx = this.v.x + (TUNE.beta * (b.x - a.x)) / dt, vy = this.v.y + (TUNE.beta * (b.y - a.y)) / dt, sp = Math.hypot(vx, vy), cap = 1.2 * Math.max(w, h);
         this.v = sp > cap ? { x: (vx * cap) / sp, y: (vy * cap) / sp } : { x: vx, y: vy };
       }
-      // the usual strength of a set: only answers that are strong enough to be the set's own pull it (a handful of weak stray answers must not lower it: the lower
-      // it is, the more strays are accepted), and it comes down slowly when the lights really are dimmer
+      // the usual strength of each colour: the median of its last 80 fresh answers (see the constructor); known after 4 answers
       for (const colour of ['green', 'amber']) {
-        const mine = hit.filter((o) => o.colour === colour && o.blob.map === 0);
-        if (!this.known[colour] && mine.length >= 2) {              // the first answers of the set say how strong it is (the middle one: a stray among them does not count)
-          const vs = mine.map((o) => o.v).sort((a, b) => a - b);
-          this.signal[colour] = Math.max(FLOOR, vs[vs.length >> 1]); this.known[colour] = true;
-        }
+        const mine = hit.filter((o) => o.colour === colour && o.blob.map === 0 && o.inlier !== false);
+        if (!mine.length) continue;
+        const list = this.vals[colour];
+        for (const o of mine) list.push(o.v);
+        if (list.length > 80) list.splice(0, list.length - 80);
+        if (list.length >= 4) { const sorted = list.slice().sort((a, b) => a - b); this.signal[colour] = Math.max(FLOOR, sorted[sorted.length >> 1]); this.known[colour] = true; }
       }
-      for (const o of hit) if (o.v >= 0.5 * this.signal[o.colour] && o.v <= (this.known[o.colour] ? HI_SHARE : 4) * this.signal[o.colour]) this.signal[o.colour] = Math.min(255, 0.9 * this.signal[o.colour] + 0.1 * o.v);
-      this.signal.green *= 0.998; this.signal.amber *= 0.998;
       if (state !== 'acquire') state = 'track';
     } else {
       this.coast++;
@@ -320,6 +348,7 @@ export class Tracker {
     if (this.H && this.coast > 8) { this.H = null; this.coast = 0; state = 'lost'; this.lostBy = 'coast'; this.pending = null; }
     else if (state === 'idle') state = 'coast';
     if (state !== 'lost' && this.coast > 0 && state !== 'acquire') state = 'coast';
+    if (this.H && state !== 'lost' && t != null) this.rememberMap(w, h, t);
     return this.result(state, obs, rms);
   }
 
@@ -448,7 +477,8 @@ export class Tracker {
     const rowSets = ((found && (found.rows && found.rows.length ? found.rows : found.row ? [found.row] : [])) || []).filter((r) => r && r.length >= 3);
     if (!squares.length) { this.acqFail = { reason: 'sans carré' }; return false; }
     if (!rowSets.length) { this.acqFail = { reason: 'sans rangée' }; return false; }
-    const P = maps.amber[0], tau = Math.max(FLOOR, 0.3 * this.signal.amber), hyps = [];
+    // (the corners found are spots above the search threshold, which follows the lights: here they only must answer a little in the fresh map)
+    const P = maps.amber[0], tau = Math.max(FLOOR, 0.15 * this.signal.amber), hyps = [];
     for (const square of squares) {
       const fresh = square.filter((c) => peakNear(P, w, h, c.x, c.y, 3) >= tau).length;
       if (fresh < 3) continue;
@@ -490,7 +520,7 @@ export class Tracker {
     const H = (src.length > 4 && fitHomography(src, dst)) || best.H;
     if (!validMap(H, w, h)) { this.acqFail = { reason: 'carte invalide' }; return false; }
     const vals = best.square.map((c) => peakNear(P, w, h, c.x, c.y, 3)).sort((a, b) => a - b);
-    this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true;
+    this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true; this.vals.amber.push(...vals);
     this.H = H; this.mirror = best.mirror; this.rotation = best.rot; this.phase = best.par; this.coast = 0; this.seen = {};
     return true;
   }
@@ -512,7 +542,7 @@ export class Tracker {
     }
     if (!best) return false;
     const vals = best.square.map((c) => peakNear(P, w, h, c.x, c.y, 3)).sort((a, b) => a - b);
-    this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true;       // the strength of the ring, on this robot, in this view: the middle two of the four
+    this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true; this.vals.amber.push(...vals);       // the strength of the ring, on this robot, in this view: the middle two of the four
     this.H = best.H; this.rotation = null; this.coast = 0; this.seen = {};
     return true;
   }
