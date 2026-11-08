@@ -14,7 +14,7 @@
 // each way at 0.6 Hz (a peak speed of 150 px a second: a phone carried in the hand).
 
 import { fromStream } from './camera.js';
-import { HALF_MS, groupMembers, circleMembers, isAlternating } from './script.js';
+import { HALF_MS, groupMembers, circleMembers, isAlternating, isDual } from './script.js';
 
 export const DEMO_W = 1280;
 export const DEMO_H = 720;
@@ -123,15 +123,17 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     // leds[] is the front row (0..7) and then the back row. The ring arcs (amber, 34 degrees long, 3 mm thick, radius 26 mm
     // round the pad). With both asked for they blink in turn (leds_lego.py): the row while the ring is off and the other way round.
     const on = !blink || Math.floor((t * 1000) / halfMs()) % 2 === 0;
-    const gp = group(), cc = ringSet(), alt = isAlternating(gp, cc);
-    const legoLit = gp !== -2 && (!blink || on), ringLit = cc >= 0 && (!blink || (alt ? !on : on));
-    const driven = new Set(groupMembers(gp).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
+    const gp = group(), cc = ringSet(), dual = isDual(gp, cc), alt = isAlternating(gp, cc);
+    // the dual flash (leds_lego.py): flash 0 = the front row and the arcs N E S W, flash 1 = the back row and the arcs NE SE SW NW; steady: all of them
+    const phase = dual && blink ? (on ? 0 : 1) : null;
+    const legoLit = gp !== -2 && (dual || !blink || on), ringLit = cc >= 0 && (dual || !blink || (alt ? !on : on));
+    const driven = new Set(groupMembers(gp, phase).map((m) => (m.row === 'front' ? 0 : 8) + m.i));
     if (legoLit) { g.save(); g.globalAlpha = rowGain; for (const [k, p] of leds.entries()) if (driven.has(k)) glow(project(cam, p), 2.6, ['rgb(255,255,255)', 'rgb(190,255,190)', 'rgb(70,255,70)', 'rgba(40,255,40,0)']); g.restore(); }
     if (ringLit) {
       g.save();
       g.globalAlpha = ringGain;                 // 1: bright arcs; 0.3: faint ones (to try the look in the window with a lower threshold)
       g.lineCap = 'round';
-      for (const m of circleMembers(cc)) {
+      for (const m of circleMembers(cc, phase)) {
         g.globalAlpha = m.i === dimArc ? dimGain : ringGain;              // `&arcdim=3&dimgain=0.3`: one arc faint (the fourth of a square of which three are seen)
         const pts = [];
         for (let a = -17; a <= 17; a += 34 / 8) { const th = (m.i * 45 + a) * DEG; pts.push(project(cam, [26 * Math.sin(th), 26 + 26 * Math.cos(th), 0])); }

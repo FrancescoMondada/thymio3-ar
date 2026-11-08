@@ -23,6 +23,11 @@
 # are parallel to the axes of the robot, so two of them are parallel to the rows of Lego LEDs (if N points to the nose:
 # to be checked on the robot).
 #
+# DUAL, GROUP 4 with CIRCLE 2 (they go together): two flashes, each with a row AND a ring set, so that every flash alone has points that are not on one
+# line, which is what the page needs to know how the robot is seen (a row alone, 4 LEDs on a line, does not fix the plane): flash 0 = the front row, even
+# indices, with the arcs N E S W; flash 1 = the back row, even indices, with the arcs NE SE SW NW. Each LED is on in its flash and off in the other.
+# In "on" every LED of both flashes is on, in "off" every one is off.
+#
 # "blink": the chosen LEDs on for HALF_MS, off for HALF_MS, and so on. When both a Lego group and a ring set are
 # chosen they ALTERNATE: the Lego LEDs are on while the ring is off, and the other way round (each set still blinks at
 # the same rhythm). The page looks for pixels that do this (pairdiff.js); HALF_MS must be the same there (src/script.js:
@@ -41,6 +46,7 @@ beh.disable_behaviors()
 front = [thymio.LEDS_LEGO_FRONT(i) for i in range(8)]
 back = [thymio.LEDS_LEGO_BACK(i) for i in range(8)]
 ring = [thymio.LEDS_CIRCLE(i) for i in range(8)]
+DUAL = GROUP == 4 and CIRCLE == 2
 
 # Every OTHER light of the robot goes out. Behaviors off does not light them or put them out: they stay as the last script or behavior left them.
 # In the photo of the 12th test the four RGB LEDs at the corners glowed magenta and cyan (the pattern of the card mode) and the one under the robot,
@@ -56,23 +62,31 @@ thymio.LED_RECEIVER().off()
 thymio.LED_MICROPHONE().off()
 
 
-def show(lego, circle):
-    # lego, circle: the level (0 or 16) of the Lego LEDs of the group and of the ring LEDs of the set
+def show(lego, circle, phase=0):
+    # lego, circle: the level (0 or 16) of the Lego LEDs of the group and of the ring LEDs of the set. DUAL: `phase` says which flash is lit (0 or 1, None: both),
+    # and lego is the level of what is lit
     for i in range(8):
-        front[i].intensity(lego if GROUP == -1 or (0 <= GROUP < 2 and i % 2 == GROUP) else 0)
-        back[i].intensity(lego if GROUP == -1 or (GROUP >= 2 and i % 2 == GROUP - 2) else 0)
-    for i in range(8):
-        ring[i].intensity(circle if CIRCLE >= 0 and i % 2 == CIRCLE else 0)
+        if DUAL:
+            front[i].intensity(lego if i % 2 == 0 and phase in (0, None) else 0)
+            back[i].intensity(lego if i % 2 == 0 and phase in (1, None) else 0)
+            ring[i].intensity(circle if phase is None or i % 2 == phase else 0)
+        else:
+            front[i].intensity(lego if GROUP == -1 or (0 <= GROUP < 2 and i % 2 == GROUP) else 0)
+            back[i].intensity(lego if GROUP == -1 or (2 <= GROUP < 4 and i % 2 == GROUP - 2) else 0)
+            ring[i].intensity(circle if CIRCLE >= 0 and i % 2 == CIRCLE else 0)
 
 
 if MODE == "blink":
-    alternate = GROUP != -2 and CIRCLE >= 0
+    alternate = GROUP != -2 and CIRCLE >= 0 and not DUAL
     t0 = time.ticks_ms()
     n = 0
     on = True
     while True:
         a = 16 if on else 0
-        show(a, (16 - a) if alternate else a)
+        if DUAL:
+            show(16, 16, 0 if on else 1)
+        else:
+            show(a, (16 - a) if alternate else a)
         on = not on
         n += 1
         wait = n * HALF_MS - time.ticks_diff(time.ticks_ms(), t0)
@@ -87,5 +101,5 @@ if MODE == "blink":
 else:
     level = 16 if MODE == "on" else 0
     while True:
-        show(level, level)
+        show(level, level, None if DUAL else 0)
         time.sleep_ms(500)

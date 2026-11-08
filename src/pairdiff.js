@@ -140,10 +140,12 @@ export class PairDiff {
   // The spots of the last picture (the SpotFinder result, plus `source`, and `peak`: the strongest response of P or N, found or not). With a `window` ({ bbox, inside(p) }: layout.js): only the
   // part of the picture inside it, which is where the page expects this set to be because the OTHER set has been found: the threshold
   // can then be lower than elsewhere (a faint arc next to a row that is seen well), without the noise of the rest of the picture.
-  find(threshold, size, window = null) {
+  // only: 'P' looks at what lights up NOW only (the dual flash: the row and the ring are lit together, both fresh; the map N would give the other flash, 0.1 to
+  // 0.3 s old, which is a different place of the robot)
+  find(threshold, size, window = null, only = null) {
     if (window) return this.findIn(threshold, size, window);
     const rp = this.pf.findFromValues(this.P, this.w, this.h, threshold, size);
-    const rn = this.nf.findFromValues(this.N, this.w, this.h, threshold, size);
+    const rn = only === 'P' ? { spots: [], brightest: 0 } : this.nf.findFromValues(this.N, this.w, this.h, threshold, size);
     const useP = rp.spots.length >= rn.spots.length;
     this.source = useP ? 'P' : 'N';
     this.active = useP ? this.pf : this.nf;

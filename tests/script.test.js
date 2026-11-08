@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { HALF_MS, HALF_CHOICES, BLINK_HZ, MODES, GROUPS, CIRCLES, buildScript, groupMembers, circleMembers, countOf, isAlternating, hzOf, windowOf } from '../src/script.js';
+import { HALF_MS, HALF_CHOICES, BLINK_HZ, MODES, GROUPS, CIRCLES, buildScript, groupMembers, circleMembers, countOf, isAlternating, isDual, hzOf, windowOf } from '../src/script.js';
 
 const raw = readFileSync(new URL('../src/py/leds_lego.py', import.meta.url), 'utf8');
 
@@ -29,14 +29,16 @@ test('buildScript also writes the half period and the group of LEDs, each in its
   assert.equal(text.split('\n').length, raw.split('\n').length);
   assert.equal(buildScript(raw, 'on', HALF_MS, -1), buildScript(raw, 'on'), 'the defaults');
   assert.throws(() => buildScript(raw, 'blink', 5), /half period/);
-  assert.throws(() => buildScript(raw, 'blink', 200, 4), /group/);
+  assert.throws(() => buildScript(raw, 'blink', 200, 5), /group/);
   assert.throws(() => buildScript(raw.replace(/^GROUP.*$/m, ''), 'blink'), /GROUP line/);
   assert.throws(() => buildScript(raw.replace(/^CIRCLE.*$/m, ''), 'blink'), /CIRCLE line/);
-  assert.throws(() => buildScript(raw, 'blink', 200, 0, 2), /ring/);
+  assert.throws(() => buildScript(raw, 'blink', 200, 0, 3), /ring/);
+  assert.throws(() => buildScript(raw, 'blink', 200, 0, 2), /dual/, 'the dual flash is both groups at once');
+  assert.throws(() => buildScript(raw, 'blink', 200, 4, 1), /dual/);
 });
 
 test('the ring: even arcs N E S W or odd arcs NE SE SW NW, 4 each, and the alternation of a group and a set', () => {
-  assert.deepEqual(CIRCLES, [-1, 0, 1]);
+  assert.deepEqual(CIRCLES, [-1, 0, 1, 2]);
   assert.deepEqual(circleMembers(-1), []);
   assert.deepEqual(circleMembers(0).map((m) => m.i), [0, 2, 4, 6]);
   assert.deepEqual(circleMembers(1).map((m) => m.i), [1, 3, 5, 7]);
@@ -66,8 +68,28 @@ test('the groups: 4 LEDs each, aligned on one row 16 mm apart, together the 16',
     for (let k = 1; k < 4; k++) assert.equal(cols[k] - cols[k - 1], 2, `group ${g}: every other LED of the row, 16 mm apart`);
   }
   assert.equal(seen.size, 16);
-  assert.deepEqual(GROUPS, [-2, -1, 0, 1, 2, 3]);
+  assert.deepEqual(GROUPS, [-2, -1, 0, 1, 2, 3, 4]);
   assert.equal(groupMembers(-2).length, 0, 'no Lego LED');
+});
+
+test('the dual flash: the front row and the arcs N E S W, then the back row and the arcs NE SE SW NW', () => {
+  assert.equal(isDual(4, 2), true);
+  assert.equal(isDual(4, 1), false);
+  assert.equal(isDual(0, 2), false);
+  assert.equal(isAlternating(4, 2), false, 'the sets are lit together in a flash: it is not the row / ring alternation');
+  const f0 = [...groupMembers(4, 0), ...circleMembers(2, 0)], f1 = [...groupMembers(4, 1), ...circleMembers(2, 1)];
+  assert.deepEqual(groupMembers(4, 0).map((m) => `${m.row}${m.i}`), ['front0', 'front2', 'front4', 'front6']);
+  assert.deepEqual(groupMembers(4, 1).map((m) => `${m.row}${m.i}`), ['back0', 'back2', 'back4', 'back6']);
+  assert.deepEqual(circleMembers(2, 0).map((m) => m.i), [0, 2, 4, 6]);
+  assert.deepEqual(circleMembers(2, 1).map((m) => m.i), [1, 3, 5, 7]);
+  assert.equal(f0.length, 8);
+  assert.equal(f1.length, 8);
+  assert.equal(groupMembers(4).length, 8, 'both flashes together: both rows');
+  assert.equal(circleMembers(2).length, 8, 'both flashes together: all the arcs');
+  assert.equal(countOf(4, 2), 8, 'points of one flash');
+  const text = buildScript(raw, 'blink', 200, 4, 2);
+  assert.ok(/^GROUP = 4$/m.test(text) && /^CIRCLE = 2$/m.test(text));
+  assert.equal(text.split('\n').length, raw.split('\n').length);
 });
 
 test('the window is 2.5 periods of the blink, whatever its speed', () => {

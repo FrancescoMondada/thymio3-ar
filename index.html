@@ -179,7 +179,8 @@
           </label>
           <label>LED vertes
             <select id="ledGroup">
-              <option value="0" selected>4 alignées : avant A</option>
+              <option value="4" selected>rangée avant puis arrière (avec l'anneau complet)</option>
+              <option value="0">4 alignées : avant A</option>
               <option value="1">4 alignées : avant B</option>
               <option value="2">4 alignées : arrière A</option>
               <option value="3">4 alignées : arrière B</option>
@@ -189,12 +190,13 @@
           </label>
           <label>Arcs ambre
             <select id="circleSet">
-              <option value="1" selected>carré NE SE SW NW</option>
+              <option value="2" selected>les deux jeux, en alternance (avec les 2 rangées)</option>
+              <option value="1">carré NE SE SW NW</option>
               <option value="0">carré N E S W</option>
               <option value="-1">aucun</option>
             </select>
           </label>
-          <p class="note" style="margin:0 0 4px">Avec des LED vertes et des arcs, ils clignotent à tour de rôle : la couleur dit lequel est lequel.</p>
+          <p class="note" style="margin:0 0 4px">Par défaut : à chaque flash une rangée de 4 LED vertes ET 4 arcs ambre (avant + N E S W, puis arrière + NE SE SW NW), pour que chaque flash donne à lui seul la carte du plan. Sinon, une rangée et un jeu d'arcs clignotent à tour de rôle : la couleur dit lequel est lequel.</p>
           <label>Vitesse
             <select id="blinkSpeed">
               <option value="400">lente : 1,25 Hz</option>

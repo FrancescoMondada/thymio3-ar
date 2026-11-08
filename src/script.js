@@ -17,20 +17,26 @@ export const MODES = ['on', 'off', 'blink'];
 // square turned by 45 degrees), 1 = NE SE SW NW (a square whose sides are parallel to the axes of the robot, so two of
 // them to the rows of Lego LEDs, if N points to the nose). Same rules as GROUP and CIRCLE in leds_lego.py. When both a
 // group and a ring set are chosen the script makes them blink in turn (alternate).
+//
+// DUAL, GROUP 4 with CIRCLE 2 (the two go together): two flashes, each with a row AND a ring set, so that every flash alone has points that are not on one line
+// and gives the whole map of the plane (a row alone cannot: the geometry test of the 13th step): flash 0 = the front row, even indices, and the arcs N E S W;
+// flash 1 = the back row, even indices, and the arcs NE SE SW NW. Each LED is on in its flash and off in the other.
 // -> [{ row: 'front' | 'back' | 'circle', i }]
-export const GROUPS = [-2, -1, 0, 1, 2, 3];
-export const CIRCLES = [-1, 0, 1];
-export const groupMembers = (group) => {
+export const GROUPS = [-2, -1, 0, 1, 2, 3, 4];
+export const CIRCLES = [-1, 0, 1, 2];
+export const isDual = (group, circle) => group === 4 && circle === 2;
+// phase: for the dual script only, 0 or 1 (which flash), or null (all the LEDs of both flashes)
+export const groupMembers = (group, phase = null) => {
   const out = [];
   for (let i = 0; i < 8; i++) {
-    if (group === -1 || (group >= 0 && group < 2 && i % 2 === group)) out.push({ row: 'front', i });
-    if (group === -1 || (group >= 2 && i % 2 === group - 2)) out.push({ row: 'back', i });
+    if (group === -1 || (group >= 0 && group < 2 && i % 2 === group) || (group === 4 && i % 2 === 0 && (phase === null || phase === 0))) out.push({ row: 'front', i });
+    if (group === -1 || (group >= 2 && group < 4 && i % 2 === group - 2) || (group === 4 && i % 2 === 0 && (phase === null || phase === 1))) out.push({ row: 'back', i });
   }
   return out;
 };
-export const circleMembers = (circle) => (circle < 0 ? [] : [0, 1, 2, 3, 4, 5, 6, 7].filter((i) => i % 2 === circle).map((i) => ({ row: 'circle', i })));
-export const countOf = (group, circle = -1) => groupMembers(group).length + circleMembers(circle).length;   // 16, 4, 8, 0...
-export const isAlternating = (group, circle) => group !== -2 && circle >= 0;
+export const circleMembers = (circle, phase = null) => (circle < 0 ? [] : [0, 1, 2, 3, 4, 5, 6, 7].filter((i) => (circle === 2 ? phase === null || i % 2 === phase : i % 2 === circle)).map((i) => ({ row: 'circle', i })));
+export const countOf = (group, circle = -1) => groupMembers(group, group === 4 ? 0 : null).length + circleMembers(circle, circle === 2 ? 0 : null).length;   // 16, 4, 8, 0... (per flash for the dual)
+export const isAlternating = (group, circle) => group !== -2 && circle >= 0 && !isDual(group, circle);
 
 // the time window the detector looks at for a half period `halfMs`: 2.5 periods, with the mean and the slope taken
 // out, so that a steady pixel gives 0 and a pixel that blinks gives its amplitude
@@ -41,6 +47,7 @@ export function buildScript(raw, mode, halfMs = HALF_MS, group = -1, circle = -1
   if (!MODES.includes(mode)) throw new Error(`unknown LED mode: ${mode}`);
   if (!GROUPS.includes(group)) throw new Error(`unknown group of LEDs: ${group}`);
   if (!CIRCLES.includes(circle)) throw new Error(`unknown set of ring LEDs: ${circle}`);
+  if ((group === 4) !== (circle === 2)) throw new Error('the dual flash is both groups at once: GROUP 4 goes with CIRCLE 2');
   if (!Number.isInteger(halfMs) || halfMs < 40 || halfMs > 2000) throw new Error(`unusable half period: ${halfMs} ms`);
   const line = 'MODE = "on"';
   if (!raw.includes(line)) throw new Error('leds_lego.py has no MODE line to write the mode in');

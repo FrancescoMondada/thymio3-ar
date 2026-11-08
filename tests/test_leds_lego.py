@@ -290,5 +290,57 @@ class Ring(unittest.TestCase):
             self.assertLessEqual(abs(t - n * HALF_MS), 1.0)
 
 
+class Dual(unittest.TestCase):
+    """GROUP 4 with CIRCLE 2: flash 0 = the front row (even) and the arcs N E S W, flash 1 = the back row (even) and the arcs NE SE SW NW."""
+
+    def run_dual(self, mode="blink", limit=60 * HALF_MS, **kw):
+        return Robot(mode, limit, group=4, circle=2, **kw).run()
+
+    def test_each_flash_lights_one_row_and_one_ring_set_and_the_next_flash_the_others(self):
+        half = 100
+        r = self.run_dual(limit=60 * half, half_ms=half)
+        front, back = r.shows("front", 0), r.shows("back", 0)
+        n_arc, ne_arc = r.shows("circle", 0), r.shows("circle", 1)
+        self.assertEqual([lvl for _, lvl in front[:6]], [16, 0, 16, 0, 16, 0])
+        self.assertEqual([lvl for _, lvl in back[:6]], [0, 16, 0, 16, 0, 16])
+        self.assertEqual([lvl for _, lvl in n_arc[:6]], [16, 0, 16, 0, 16, 0])
+        self.assertEqual([lvl for _, lvl in ne_arc[:6]], [0, 16, 0, 16, 0, 16])
+        for (t0, _), (t1, _) in zip(front, front[1:]):
+            self.assertEqual(t1 - t0, half)
+
+    def test_the_odd_leds_of_the_rows_stay_dark(self):
+        r = self.run_dual()
+        self.assertEqual({lvl for _, lvl in r.shows("front", 1)} | {lvl for _, lvl in r.shows("back", 1)}, {0})
+
+    def test_four_row_leds_and_four_arcs_are_lit_at_every_moment(self):
+        r = self.run_dual()
+        leds = [e for e in r.events if e[0] == "led"]
+        for i in range(0, len(leds) - 23, 24):
+            chunk = leds[i:i + 24]
+            lit_row = [(e[1], e[2]) for e in chunk if e[1] in ("front", "back") and e[3] == 16]
+            lit_arcs = sorted(e[2] for e in chunk if e[1] == "circle" and e[3] == 16)
+            self.assertEqual(len(lit_row), 4)
+            self.assertEqual(len({row for row, _ in lit_row}), 1, "one row only")
+            row = lit_row[0][0]
+            self.assertEqual(lit_arcs, [0, 2, 4, 6] if row == "front" else [1, 3, 5, 7])
+
+    def test_the_beat_is_kept_when_the_led_calls_take_time(self):
+        r = Robot("blink", 200 * HALF_MS, led_cost_ms=0.2, group=4, circle=2).run()
+        for n, (t, _) in enumerate(r.shows("circle", 0)):
+            self.assertLessEqual(abs(t - n * HALF_MS), 1.0)
+
+    def test_steady_modes_light_or_darken_every_led_of_both_flashes(self):
+        on = self.run_dual("on", 1200)
+        self.assertEqual([i for i, lvl in enumerate(on.state["front"]) if lvl == 16], [0, 2, 4, 6])
+        self.assertEqual([i for i, lvl in enumerate(on.state["back"]) if lvl == 16], [0, 2, 4, 6])
+        self.assertEqual(on.state["circle"], [16] * 8)
+        off = self.run_dual("off", 1200)
+        self.assertEqual(off.state["front"] + off.state["back"] + off.state["circle"], [0] * 24)
+
+    def test_every_other_light_is_out_in_the_dual_too(self):
+        r = self.run_dual(limit=1200)
+        self.assertEqual(set(r.other.values()), {0})
+
+
 if __name__ == "__main__":
     unittest.main()

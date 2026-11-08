@@ -22,7 +22,7 @@
 // and the other answered a moment ago (the map N holds it as a streak of the places it had in the last 0.3 s, too blurred to count).
 //
 // The maps P and N of pairdiff.js: P (what lit up since an older picture) is where a set is NOW, N (what went dark) is where it was 0.1 to 0.3 s ago.
-import { fitHomography, ransacHomography, applyH, scaleAt, compose } from './homography.js';
+import { fitHomography, ransacHomography, reprojection, applyH, scaleAt, compose } from './homography.js';
 import { blobNear } from './evidence.js';
 import { ring, legoPoint, rowName, ROW_GAP, SQUARE_SIDE } from './layout.js';
 
@@ -37,14 +37,22 @@ export const CONFIRM_MS = 450;                  // a place is confirmed if it an
 export const OUTSIDE_PICTURES = 6;               // the middle of the ring has been outside the picture for this many pictures in a row: the robot is gone, the map is dropped
 export const RING_LOST_MS = 2000;               // ... and for this long: the map is lost (the row alone keeps a map alive by shifts, but cannot say how it is turned)
 
-// the places of the LEDs of the group and of the arcs of the set, in the plane of the robot, for a layout of the row (mirror = +1 or -1)
+// the places of the LEDs of the group and of the arcs of the set, in the plane of the robot, for a layout of the row (mirror = +1 or -1).
+// Each place has `set` ('row' | 'ring': what it is), `key` (the set it belongs to) and `phase` (which flash lights it).
+//   the first script (a group and a ring set that alternate): the row is the phase 0, the ring the phase 1 (they are lit in turn);
+//   the DUAL flash (group 4 with circle 2, leds_lego.py): the phase 0 is the front row (even) and the arcs N E S W, the phase 1 the back row (even) and the arcs NE SE SW NW.
+export const isDualMode = (group, circle) => group === 4 && circle === 2;
 export function expectedPoints({ group, circle, mirror = 1 }) {
   const pts = [];
-  if (group >= 0) {
-    const name = rowName(group), par = group % 2;
-    for (let j = 0; j < 4; j++) { const k = par + 2 * j, [X, Y] = legoPoint(name, k); pts.push({ id: `row${k}`, set: 'row', colour: 'green', X: mirror < 0 ? -X : X, Y }); }
-  }
-  if (circle >= 0) for (let i = 0; i < 8; i++) if (i % 2 === circle) { const [X, Y] = ring(i); pts.push({ id: `arc${i}`, set: 'ring', colour: 'amber', X, Y, arc: i }); }
+  const row = (name, par, key, phase) => {
+    for (let j = 0; j < 4; j++) { const k = par + 2 * j, [X, Y] = legoPoint(name, k); pts.push({ id: `${name === 'front' ? 'row' : 'rowb'}${k}`, set: 'row', key, phase, colour: 'green', X: mirror < 0 ? -X : X, Y }); }
+  };
+  const arcs = (par, key, phase) => {
+    for (let i = 0; i < 8; i++) if (i % 2 === par) { const [X, Y] = ring(i); pts.push({ id: `arc${i}`, set: 'ring', key, phase, colour: 'amber', X, Y, arc: i }); }
+  };
+  if (isDualMode(group, circle)) { row('front', 0, 'rowF', 0); arcs(0, 'ringA', 0); row('back', 0, 'rowB', 1); arcs(1, 'ringB', 1); return pts; }
+  if (group >= 0) row(rowName(group), group % 2, 'row', 0);
+  if (circle >= 0) arcs(circle, 'ring', 1);
   return pts;
 }
 const ringIds = (circle) => [0, 1, 2, 3, 4, 5, 6, 7].filter((i) => i % 2 === circle);       // clockwise from N, as pickSquare orders the corners on the screen
@@ -121,6 +129,7 @@ export class Tracker {
   // predicted, and the whole picture holds lights that are not LEDs (a light that comes out of a hole in the side of the body blinks like one). Yes with no map, a map
   // waiting for its row, one that is struggling (a correction missed), or one that has not had a full fit of the ring for a while (a refresh may be needed).
   wantsFound(t) {
+    if (this.dual) return !this.H || this.coast > 2;
     return !this.H || !!this.pending || this.coast > 2 || (t != null && this.ringFullT != null && t - this.ringFullT > 0.4 * REFRESH_MS);
   }
 
@@ -134,6 +143,8 @@ export class Tracker {
   // motion: the speed of the phone, deg/s;  group, circle: what the robot was asked to light (script.js)
   update({ maps, w, h, group, circle, found = null, motion = 0, t = null }) {
     let state = 'idle', acquired = false;
+    const dual = isDualMode(group, circle);
+    this.dual = dual;
     this.refreshed = false;
     if (circle < 0 || group < 0) { this.reset(); return this.result('idle', [], null); }            // the row alone fixes no map: nothing to track
     // the map moves in the picture as the phone moves: with the speed it had, the places are predicted where they will be NOW, not where they were at the
@@ -147,12 +158,12 @@ export class Tracker {
     if (!this.H) {
       // a map starts from the ring alone, seen in this very picture (the spots of locate.js are as old as the map they came from: up to 0.3 s for the set
       // that is dark, and a hand at 100 px/s moves 30 px in that time): the 4 arcs fix the map up to a quarter turn, and the row, when it is lit, says which
-      acquired = this.acquireRing(found, { maps, w, h, circle, group });
+      acquired = dual ? this.acquireDual(found, { maps, w, h }) : this.acquireRing(found, { maps, w, h, circle, group });
       state = acquired ? 'acquire' : 'lost';
       if (acquired && !validMap(this.H, w, h)) { this.H = null; acquired = false; this.nInvalid = (this.nInvalid || 0) + 1; }
       if (!acquired) return this.result('lost', [], null);
-      this.v = { x: 0, y: 0 }; this.ringT = t; this.fixT = t; this.ringFullT = t; this.pending = { t0: t, n: 0 };
-    } else if (found && !this.pending && t != null && this.ringFullT != null && t - this.ringFullT > REFRESH_MS) {
+      this.v = { x: 0, y: 0 }; this.ringT = t; this.fixT = t; this.ringFullT = t; this.pending = dual ? null : { t0: t, n: 0 };
+    } else if (!dual && found && !this.pending && t != null && this.ringFullT != null && t - this.ringFullT > REFRESH_MS) {
       // three arcs have corrected the map for a second (an affine correction cannot repair the shape of the map: one wrong fit once is kept for good): a
       // full square of fresh corners, if there is one, starts the map again, from the ring; the row says again which way round it is
       const v = this.v, old = this.H, rot0 = this.rotation, seen0 = this.seen;
@@ -183,7 +194,7 @@ export class Tracker {
     let snap = this.snap({ maps, w, h, group, circle, speed: Math.hypot(this.v.x, this.v.y), since, rows });
     if (snap) { const Hs = shifted(this.H, snap.dx, snap.dy); if (validMap(Hs, w, h)) this.H = Hs; else snap = null; }
     this.snapInfo = snap;
-    const obs = this.match(this.H, this.mirror || 1, { maps, w, h, group, circle, motion, v: this.v, dt: snap ? 0 : since, rows });
+    const obs = this.match(this.H, this.mirror || 1, { maps, w, h, group, circle, motion, v: this.v, dt: snap ? 0 : since, rows, litPhase: dual ? (snap && snap.phase != null ? snap.phase : this.phase ?? null) : null });
     // Consistency first. With 4 points a map has no redundancy (any 4 points fit exactly): one stray blob in a window would be accepted and
     // would drag the map off. But the answers of a phone that moves between two pictures are all displaced by about the same amount from the
     // places that were predicted: a point whose displacement is not near the middle one is not the LED or the arc, whatever its strength.
@@ -206,11 +217,28 @@ export class Tracker {
     // it backwards by the movement of the phone in between: the ring lit gives 4 fresh points, enough for the whole map; the row lit gives
     // 4 fresh points on a line, which fix only where the robot is, not how it is turned: the map is shifted by what they say and no more.
     const fresh = hit.filter((o) => o.blob.map === 0);
+    if (dual) {
+      const f0 = fresh.filter((o) => o.phase === 0).length, f1 = fresh.filter((o) => o.phase === 1).length;
+      if (f0 + f1 >= 2) this.phase = f0 >= f1 ? 0 : 1; else if (snap && snap.phase != null) this.phase = snap.phase;
+    }
     let rms = null, updated = false, ringFixed = false;
     const freshRing = fresh.filter((o) => o.set === 'ring');
     // a correction of the map as rich as the fresh answers allow: the whole map (4 points or more, RANSAC), an affine correction (3 points not on a
     // line: the ring with one arc missing), or a shift (the row: 3 or 4 points on a line)
-    if (freshRing.length >= 4) {
+    if (dual && fresh.length >= 5) {
+      // the dual flash: the row AND the ring are lit in the same flash, 8 points that are not on a line: the whole map from this one picture, with 4 points more than it needs,
+      // so that a stray answer (a light out of a hole in the side of the body) is the one that does not fit
+      const src = fresh.map((o) => ({ x: o.X, y: o.Y })), dst = fresh.map((o) => ({ x: o.blob.x, y: o.blob.y }));
+      // all of them agree (the usual case): one fit; else the subsets of 4 are tried and the points that fit are kept
+      const all = fitHomography(src, dst), err = all ? reprojection(all, src, dst) : null;
+      const fit = all && err.every((e) => e <= tol + 1) ? { H: all, inliers: err.map((_, i) => i), rms: Math.sqrt(err.reduce((a, e) => a + e * e, 0) / err.length) } : ransacHomography(src, dst, { tol: tol + 1, minInliers: 5 });
+      if (fit) {
+        this.H = fit.H; rms = fit.rms; updated = true; ringFixed = true;
+        fresh.forEach((o, i) => { o.inlier = fit.inliers.includes(i); });
+        if (t != null) this.ringFullT = t;
+      }
+    }
+    if (!updated && freshRing.length >= 4) {
       // (the ring only: a stray response near a place of the row, which is dark when the ring is lit, must not take the place of an arc in a fit that
       // 4 points always satisfy)
       const fit = ransacHomography(freshRing.map((o) => ({ x: o.X, y: o.Y })), freshRing.map((o) => ({ x: o.blob.x, y: o.blob.y })), { tol, minInliers: 4 });
@@ -231,7 +259,7 @@ export class Tracker {
       if (Math.hypot(dx, dy) < 12 * s0 + 2) { this.H = shifted(this.H, dx, dy); updated = true; }
     }
     if (updated && !validMap(this.H, w, h)) { this.H = before; updated = false; rms = null; ringFixed = false; this.nInvalid = (this.nInvalid || 0) + 1; }
-    this.diag = { hit: hit.length, fresh: fresh.length, freshRing: freshRing.length, freshRow: fresh.length - freshRing.length, rejected: obs.filter((o) => o.rejected).length, how: updated ? (freshRing.length >= 4 && obs.some((o) => o.inlier) ? 'fit' : freshRing.length >= 3 ? 'affine' : 'shift') : 'none', coast: this.coast, motion };
+    this.diag = { hit: hit.length, fresh: fresh.length, freshRing: freshRing.length, freshRow: fresh.length - freshRing.length, rejected: obs.filter((o) => o.rejected).length, how: updated ? ((freshRing.length >= 4 || (dual && fresh.length >= 5)) && obs.some((o) => o.inlier) ? 'fit' : freshRing.length >= 3 ? 'affine' : 'shift') : 'none', coast: this.coast, motion };
     if (updated) {
       this.coast = 0;
       if (ringFixed && t != null) this.ringT = t;
@@ -269,7 +297,7 @@ export class Tracker {
     // the answers are against the places that were predicted (px): a LED that is dim, a place that is systematically off (layout of the row, height of the LEDs)
     for (const o of obs) {
       const st = (this.stats[o.id] ||= { lit: 0, hit: 0, vall: 0, dx: 0, dy: 0 });
-      if (fresh.filter((q) => q.set === o.set).length < 2) continue;
+      if (fresh.filter((q) => q.key === o.key).length < 2) continue;
       st.lit++; st.vall += o.v;
       if (o.matched && o.blob.map === 0 && o.inlier !== false) { st.hit++; st.dx += o.blob.x - o.px.x; st.dy += o.blob.y - o.px.y; }
     }
@@ -295,27 +323,33 @@ export class Tracker {
     return this.result(state, obs, rms);
   }
 
-  // How far must the map be shifted for the pattern of the places of a set to fall on the responses of the fresh map P? Each shift within the reach of
-  // the uncertainty is scored by how many of the places have a response under them (each counted up to the usual strength of the set, so that a stray
-  // blob much stronger than the LEDs does not count more than one place), minus a little for the distance (the nearest shift wins a tie). The set that
-  // is lit is the one with a good score (the other has nothing in P). -> { set, dx, dy, count, score } | null
+  // How far must the map be shifted for the pattern of the places that are lit together (a PHASE) to fall on the responses of the fresh maps P? Each shift within the
+  // reach of the uncertainty is scored by how many of the places have a response under them (each counted up to the usual strength of its set, so that a stray blob much
+  // stronger than the LEDs does not count more than one place), minus a little for the distance (the nearest shift wins a tie). The phase that is lit is the one with a
+  // good score (the other has nothing in P). With the first script a phase is one set (the row, or the ring); with the dual flash it is a row AND a ring set, 8 places in
+  // two colours, which a hole or a slip of one pitch along the row cannot satisfy. -> { phase, set, dx, dy, count, byKind, score } | null
   snap({ maps, w, h, group, circle, speed, since, rows = true }) {
     let best = null;
-    const pts = expectedPoints({ group, circle, mirror: this.mirror || 1 });
-    for (const set of rows ? ['row', 'ring'] : ['ring']) {
-      const places = pts.filter((p) => p.set === set).map((p) => ({ ...p, px: applyH(this.H, p.X, p.Y), s: scaleAt(this.H, p.X, p.Y) }));
+    const pts = expectedPoints({ group, circle, mirror: this.mirror || 1 }).filter((p) => rows || p.set !== 'row');
+    for (const phase of [...new Set(pts.map((p) => p.phase))]) {
+      const places = pts.filter((p) => p.phase === phase).map((p) => {
+        const tau = Math.max(FLOOR, TAU_SHARE * this.signal[p.colour]);
+        return { ...p, px: applyH(this.H, p.X, p.Y), s: scaleAt(this.H, p.X, p.Y), P: maps[p.colour][0], tau, cap: Math.max(2 * tau, 1.2 * this.signal[p.colour]), hi: this.hi(p.colour) };
+      });
       if (places.length < 3) continue;
-      const s0 = places.reduce((a, p) => a + p.s, 0) / places.length, colour = places[0].colour;
+      const s0 = places.reduce((a, p) => a + p.s, 0) / places.length;
       if (!Number.isFinite(s0) || s0 <= 0 || s0 > 80) continue;
-      const tau = Math.max(FLOOR, TAU_SHARE * this.signal[colour]), cap = Math.max(2 * tau, 1.2 * this.signal[colour]);
+      const hasRow = places.some((p) => p.set === 'row'), hasRing = places.some((p) => p.set === 'ring');
       // once the map is known the LEDs are near where it says: the reach grows only with the speed of the phone and the time since the last correction (the cap
       // is a neighbour's distance: a LED of the row is 16 mm from the next, an arc 37 mm from the next). A light that comes out of a hole in the side of the body
       // is a blinking spot like a LED, but not near a place.
-      const reach = Math.min(set === 'row' ? 1.4 * ROW_GAP * s0 : 0.9 * SQUARE_SIDE * s0, ((set === 'row' ? 6 : 10) * s0 + 2) + TUNE.reachK * speed * since);
-      const top = slide(maps[colour][0], w, h, places, { tau, cap, reach, hi: this.hi(colour) });
+      const cap = Math.min(hasRow ? 1.4 * ROW_GAP * s0 : Infinity, hasRing && !hasRow ? 0.9 * SQUARE_SIDE * s0 : Infinity);
+      const reach = Math.min(cap, ((hasRow ? 6 : 10) * s0 + 2) + TUNE.reachK * speed * since);
+      const top = slide(null, w, h, places, { reach });
+      if (!top) continue;
       // two LEDs of the row are enough only for a small shift (a dim row); more LEDs, a larger one
-      const small = top && Math.hypot(top.dx, top.dy) <= 0.4 * ROW_GAP * s0;
-      if (top && (set === 'row' ? top.count >= 3 || (top.count === 2 && small) : top.count >= 3) && (!best || top.score > best.score)) best = { set, ...top };
+      const small = Math.hypot(top.dx, top.dy) <= 0.4 * ROW_GAP * s0, nRow = top.byKind.row || 0, nRing = top.byKind.ring || 0;
+      if ((nRing >= 3 || nRow >= 3 || (nRow === 2 && small)) && (!best || top.score > best.score)) best = { phase, set: nRing >= 3 ? 'ring' : 'row', ...top };
     }
     return best;
   }
@@ -351,7 +385,9 @@ export class Tracker {
   // v (px/s) is the speed the map has: a FRESH answer (map P) is where the set is now, so it is looked for at the predicted place, within a radius that
   // leaves room for the speed having changed since the last picture; an OLD answer (map N) is where the set was about 0.2 s ago (0.08 to 0.32), so it is
   // looked for where the map WAS then, within a radius that carries that uncertainty.
-  match(H, mirror, { maps, w, h, group, circle, motion, v = { x: 0, y: 0 }, dt = 0.08, rows = true }) {
+  // litPhase (the dual flash): the places of the other flash are dark, so their fresh map is not looked at (and the old answers of the lit places are not needed when the
+  // fresh one is there): half the work
+  match(H, mirror, { maps, w, h, group, circle, motion, v = { x: 0, y: 0 }, dt = 0.08, rows = true, litPhase = null }) {
     const obs = [], speed = Math.hypot(v.x, v.y);
     for (const p of expectedPoints({ group, circle, mirror }).filter((q) => rows || q.set !== 'row')) {
       const px = applyH(H, p.X, p.Y), s = scaleAt(H, p.X, p.Y);
@@ -361,7 +397,9 @@ export class Tracker {
       // P is where the set IS (fresh), N where it WAS. The real maps are the max over several older pictures, so a set that is lit now shows in N too,
       // at the place it had in an older picture of the same phase, and about as strong: when both answer, the fresh one is taken. A set that has just
       // gone dark answers in N only (P has only strays there, weaker): the stronger one then.
-      const hi = this.hi(p.colour), fresh = blobNear([maps[p.colour][0]], w, h, px.x, px.y, r, { maxV: hi, choose: 'nearest', minV: tau }), old = blobNear([maps[p.colour][1]], w, h, px.x - OLD_AGE * v.x, px.y - OLD_AGE * v.y, ro, { maxV: hi });       // (the fresh answers fit the map: the NEAREST blob; the old ones only say that the set was there)
+      const hi = this.hi(p.colour), dark = litPhase != null && p.phase !== litPhase;
+      const fresh = dark ? null : blobNear([maps[p.colour][0]], w, h, px.x, px.y, r, { maxV: hi, choose: 'nearest', minV: tau });
+      const old = litPhase != null && fresh ? null : blobNear([maps[p.colour][1]], w, h, px.x - OLD_AGE * v.x, px.y - OLD_AGE * v.y, ro, { maxV: hi });       // (the fresh answers fit the map: the NEAREST blob; the old ones only say that the set was there)
       let blob = null;
       if (fresh && old) blob = fresh.v >= 0.6 * old.v ? fresh : { ...old, map: 1 };
       else if (fresh) blob = fresh;
@@ -382,15 +420,68 @@ export class Tracker {
   }
 
   result(state, obs, rms) {
-    const row = obs.filter((o) => o.set === 'row'), ringPts = obs.filter((o) => o.set === 'ring');
+    // with the dual flash the counts are those of the places of the flash that is lit in this picture (8 of the 16), the others being the other flash's
+    const scope = this.dual && obs.length ? obs.filter((o) => o.phase === (this.phase ?? 0)) : obs;
+    const row = scope.filter((o) => o.set === 'row'), ringPts = scope.filter((o) => o.set === 'ring');
     const ok = (o) => o.matched && o.inlier !== false;
     return {
       state, tracking: !!this.H && state !== 'lost', H: this.H, mirror: this.mirror, rotation: this.rotation, rms, speed: Math.hypot(this.v.x, this.v.y), invalid: this.nInvalid || 0, pending: !!this.pending, refreshed: !!this.refreshed, lostBy: state === 'lost' ? this.lostBy || null : null,
+      phase: this.dual ? (this.phase ?? 0) : null, dual: !!this.dual,
       scale: this.H ? scaleAt(this.H, 0, 26) : NaN, points: obs,
-      expected: obs.length, matched: obs.filter(ok).length, rowMatched: row.filter(ok).length, ringMatched: ringPts.filter(ok).length,
-      confirmed: obs.filter((o) => o.confirmed).length, rowConfirmed: row.filter((o) => o.confirmed).length, ringConfirmed: ringPts.filter((o) => o.confirmed).length,
-      complete: !this.pending && obs.length > 0 && obs.every((o) => o.confirmed), diag: this.diag || null,
+      expected: scope.length, matched: scope.filter(ok).length, rowMatched: row.filter(ok).length, ringMatched: ringPts.filter(ok).length,
+      confirmed: scope.filter((o) => o.confirmed).length, rowConfirmed: row.filter((o) => o.confirmed).length, ringConfirmed: ringPts.filter((o) => o.confirmed).length,
+      complete: !this.pending && scope.length > 0 && scope.every((o) => o.confirmed), diag: this.diag || null,
     };
+  }
+
+  // The first map of the dual flash, from ONE picture: the 4 arcs and the 4 LEDs of the row are lit in the same flash, so they are all fresh (found.rings: the candidate
+  // squares of arcs; found.row: the 3 or 4 aligned spots). The square gives the map up to which of the two ring sets it is (N E S W or NE SE SW NW: the flash), which
+  // quarter turn, and the layout of the row; each of these hypotheses predicts where the row falls, and the spots say which is right: the mean distance of the spots
+  // to the nearest predicted LED, in units of the gap between LEDs (0 is perfect), must be small, and the best (set, quarter turn) clearly better than the next.
+  acquireDual(found, { maps, w, h }) {
+    const squares = ((found && (found.rings || (found.ring ? [found.ring] : []))) || []).filter((q) => q && q.length === 4);
+    const spots = found && found.row && found.row.length >= 3 ? found.row : null;
+    if (!squares.length || !spots) return false;
+    const P = maps.amber[0], tau = Math.max(FLOOR, 0.3 * this.signal.amber), hyps = [];
+    for (const square of squares) {
+      const fresh = square.filter((c) => peakNear(P, w, h, c.x, c.y, 3) >= tau).length;
+      if (fresh < 3) continue;
+      const corners = square.map((c) => ({ x: c.x, y: c.y }));
+      for (const par of [0, 1]) {
+        const ids = ringIds(par);
+        for (let rot = 0; rot < 4; rot++) {
+          const H = fitHomography(ids.map((_, j) => { const [X, Y] = ring(ids[(j + rot) % 4]); return { x: X, y: Y }; }), corners);
+          if (!H || !validMap(H, w, h)) continue;
+          for (const mirror of this.mirror ? [this.mirror] : [1, -1]) {
+            const rowPl = expectedPoints({ group: 4, circle: 2, mirror }).filter((p) => p.set === 'row' && p.phase === par);
+            const pred = rowPl.map((p) => applyH(H, p.X, p.Y)), gap = ROW_GAP * scaleAt(H, 0, rowPl[0].Y);
+            if (!(gap > 0)) continue;
+            const err = spots.reduce((a, sp) => a + Math.min(...pred.map((q) => Math.hypot(q.x - sp.x, q.y - sp.y))), 0) / spots.length / gap;
+            hyps.push({ H, par, rot, mirror, err, square, rowPl, pred });
+          }
+        }
+      }
+    }
+    if (!hyps.length) return false;
+    // the best hypothesis of each (set, quarter turn, square): the layout of the row may be either, the others differ by much more
+    const byKey = new Map();
+    for (const hp of hyps) { const k = `${squares.indexOf(hp.square)}/${hp.par}/${hp.rot}`; if (!byKey.has(k) || hp.err < byKey.get(k).err) byKey.set(k, hp); }
+    const ranked = [...byKey.values()].sort((a, b) => a.err - b.err);
+    const best = ranked[0];
+    if (best.err > 0.35 || (ranked.length > 1 && ranked[1].err - best.err < 0.15)) return false;
+    // all the 8 points at once: the corners and each spot with its nearest predicted LED
+    const src = [], dst = [];
+    best.square.forEach((c, j) => { const ids = ringIds(best.par), [X, Y] = ring(ids[(j + best.rot) % 4]); src.push({ x: X, y: Y }); dst.push({ x: c.x, y: c.y }); });
+    for (const sp of spots) {
+      let bi = 0, bd = Infinity; best.pred.forEach((q, i) => { const d = Math.hypot(q.x - sp.x, q.y - sp.y); if (d < bd) { bd = d; bi = i; } });
+      if (bd < 0.5 * ROW_GAP * scaleAt(best.H, 0, best.rowPl[0].Y)) { src.push({ x: best.rowPl[bi].X, y: best.rowPl[bi].Y }); dst.push({ x: sp.x, y: sp.y }); }
+    }
+    const H = (src.length > 4 && fitHomography(src, dst)) || best.H;
+    if (!validMap(H, w, h)) return false;
+    const vals = best.square.map((c) => peakNear(P, w, h, c.x, c.y, 3)).sort((a, b) => a - b);
+    this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true;
+    this.H = H; this.mirror = best.mirror; this.rotation = best.rot; this.phase = best.par; this.coast = 0; this.seen = {};
+    return true;
   }
 
   // The first map, from the ring alone. found.rings: the candidate squares, each the 4 corners of the square of arcs ordered around on the screen (one when
@@ -438,16 +529,17 @@ export function rowCompatible(H, row, group, mirror = 1) {
   return false;
 }
 
-// the map slid: the shift (within `reach` px) at which the places have the most under them in the picture P (see Tracker.snap). places: [{ px: {x, y} }]
-export function slide(P, w, h, places, { tau, cap, reach, hi = Infinity }) {
+// the map slid: the shift (within `reach` px) at which the places have the most under them in their pictures (see Tracker.snap). places: [{ px: {x, y}, P?, tau?, cap?, hi?,
+// set? }]: a place has its own picture and its own thresholds (the row is green, the arcs amber), or they are given once for all as P, tau, cap, hi.
+export function slide(P, w, h, places, { tau = 20, cap = 100, reach, hi = Infinity }) {
   // bounded whatever it is given: a reach from a map that went wrong must not turn into a loop of millions of shifts
   if (!(reach > 0) || !places.length || !places.every((p) => Number.isFinite(p.px.x) && Number.isFinite(p.px.y))) return null;
   reach = Math.min(reach, 0.2 * Math.max(w, h), 80);
   const R = Math.max(2, Math.ceil(reach));
-  const peak = (x, y, maxV) => {
+  const peak = (A, x, y, maxV) => {
     const cx = Math.round(x), cy = Math.round(y);
     let m = 0;
-    for (let yy = cy - 1; yy <= cy + 1; yy++) for (let xx = cx - 1; xx <= cx + 1; xx++) if (xx >= 0 && yy >= 0 && xx < w && yy < h) { const q = P[yy * w + xx]; if (q > m && q <= maxV) m = q; }
+    for (let yy = cy - 1; yy <= cy + 1; yy++) for (let xx = cx - 1; xx <= cx + 1; xx++) if (xx >= 0 && yy >= 0 && xx < w && yy < h) { const q = A[yy * w + xx]; if (q > m && q <= maxV) m = q; }
     return m;
   };
   let top = null;
@@ -455,9 +547,14 @@ export function slide(P, w, h, places, { tau, cap, reach, hi = Infinity }) {
     const d = Math.hypot(dx, dy);
     if (d > reach) return;
     let score = 0, count = 0;
-    for (const p of places) { const v = peak(p.px.x + dx, p.px.y + dy, hi); score += Math.min(v, cap) / cap; if (v >= tau) count++; }
+    const byKind = {};
+    for (const p of places) {
+      const c = p.cap ?? cap, v = peak(p.P || P, p.px.x + dx, p.px.y + dy, p.hi ?? hi);
+      score += Math.min(v, c) / c;
+      if (v >= (p.tau ?? tau)) { count++; if (p.set) byKind[p.set] = (byKind[p.set] || 0) + 1; }
+    }
     score -= 0.2 * (d / reach);
-    if (!top || score > top.score) top = { dx, dy, count, score };
+    if (!top || score > top.score) top = { dx, dy, count, score, byKind };
   };
   // every other shift first (the window of a place tolerates 1 px), then the neighbours of the best, and the shift 0 (the nearest wins a tie)
   for (let dy = -R; dy <= R; dy += 2) for (let dx = -R; dx <= R; dx += 2) consider(dx, dy);
