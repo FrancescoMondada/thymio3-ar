@@ -166,19 +166,28 @@ function tickBody(cam, now, meta) {
       const t = meta.captureTime != null ? meta.captureTime : now;
       let waiting = false, brightest = 0;
       const spots = [];
+      // the map is known and healthy: the spots of the whole picture are not looked for (they cost most of the time of a picture, and a light out of a hole in the side of the
+      // body is a spot like a LED): the maps of the pair difference are all the tracker needs, and the strongest response is read off them
+      const lite = trackOn() && !!tracker.H && !tracker.wantsFound(t);
+      trackLog.pictures = (trackLog.pictures || 0) + 1; if (lite) trackLog.lite = (trackLog.lite || 0) + 1;
+      const mapPeak = (pd) => { let m = 0; const P = pd.P, N = pd.N; for (let i = 0; i < P.length; i++) { if (P[i] > m) m = P[i]; if (N[i] > m) m = N[i]; } return m; };
       if (lineOn()) {
-        if (pdiff.push(img.data, W, H, t)) { const r = pdiff.find(state.blinkThreshold, size); spots.push(...tag(r.spots, 'line')); peakLine = r.peak; brightest = Math.max(brightest, r.peak); }
-        else waiting = true;
+        if (pdiff.push(img.data, W, H, t)) {
+          if (lite) { peakLine = mapPeak(pdiff); brightest = Math.max(brightest, peakLine); }
+          else { const r = pdiff.find(state.blinkThreshold, size); spots.push(...tag(r.spots, 'line')); peakLine = r.peak; brightest = Math.max(brightest, r.peak); }
+        } else waiting = true;
       }
       if (squareOn()) {
-        if (pdiffAmber.push(img.data, W, H, t)) { const r = pdiffAmber.find(state.ringThreshold, arcSize); spots.push(...tag(r.spots, 'ring')); peakRing = r.peak; brightest = Math.max(brightest, r.peak); }
-        else waiting = true;
+        if (pdiffAmber.push(img.data, W, H, t)) {
+          if (lite) { peakRing = mapPeak(pdiffAmber); brightest = Math.max(brightest, peakRing); }
+          else { const r = pdiffAmber.find(state.ringThreshold, arcSize); spots.push(...tag(r.spots, 'ring')); peakRing = r.peak; brightest = Math.max(brightest, r.peak); }
+        } else waiting = true;
       }
       res = waiting ? { spots: [], brightest: 0, lit: 0, waiting: true } : { spots, brightest, lit: 0 };
       if (!waiting) {
         // each set says where the other must be (layout.js), at the scale measured in this picture; where it must be, a missing set is
         // looked for again with a lower threshold
-        loc = locate({
+        loc = lite ? { aligned: null, square: null, window: null, predicted: null, rescued: false, scales: null, mismatch: false } : locate({
           line: spots.filter((sp) => sp.set === 'line'), ring: spots.filter((sp) => sp.set === 'ring'), group: state.group, wantLine: lineOn(), wantRing: squareOn(),
           elevDeg: currentAngle(), longSide,
           retryRing: squareOn() ? (w) => tag(pdiffAmber.find(Math.max(25, Math.round(state.ringThreshold * 0.45)), arcSize, w).spots, 'ring') : null,
@@ -510,7 +519,7 @@ function report() {
     `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.confirmed}/${win.last.tracker.expected} confirmés dans la dernière période, ${win.last.tracker.matched} répondent dans cette image (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched}), vitesse ${fmt(win.last.tracker.speed, 0)} px/s${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s) dont ${trackLog.refreshes} reprise(s) depuis l'anneau, ${trackLog.losses} perte(s) (${Object.entries(trackLog.lostBy).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucune'}) ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
     ...(state.detect === 'track' ? [`places, quand leur jeu est allumé (réponse fraîche · images · force moyenne de la plus forte réponse proche · écart moyen des réponses aux places prédites en px) : ${Object.entries(tracker.stats).sort(([a], [b]) => a.localeCompare(b)).map(([id, st]) => `${id} ${st.lit ? Math.round((100 * st.hit) / st.lit) : 0} % · ${st.lit} · ${fmt(st.vall / Math.max(1, st.lit), 0)} · ${st.hit ? `${fmt(st.dx / st.hit, 1)},${fmt(st.dy / st.hit, 1)}` : 'n/d'}`).join(' ; ') || 'n/d'} ; force usuelle (rangée/arcs) ${fmt(tracker.signal.green, 0)}/${fmt(tracker.signal.amber, 0)}, seuil plancher ${FLOOR}`] : []),
     ...(trackLog.errors ? [`ERREURS dans le traitement d'une image : ${trackLog.errors}, la dernière : ${trackLog.lastError}`] : []),
-    ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0} ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
+    ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0}, recherche sur toute l'image évitée dans ${fmt((100 * (trackLog.lite || 0)) / Math.max(1, trackLog.pictures || 0), 0)} % des images ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
     ...(state.detect === 'track' ? [`dernières images du suivi (état a/t/c/l = acquis/suivi/inertie/perdu, p = attend la rangée, puis rangée et arcs confirmés, x = réponse écartée): ${trackLog.recent.slice(-40).join(' ')}`] : []),
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,

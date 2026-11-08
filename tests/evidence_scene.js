@@ -23,7 +23,9 @@ function paint(map, w, h, cx, cy, sigma, amp) {
 // phase (the phone moved in between): both P and N answer for it, with about the same strength. The tracker must take P (fresh) whenever it answers.
 // shift(tMs) -> { x, y }: a translation of the whole picture (px of the 1280-wide frame), the way a phone swaying in the hand moves it (demo.js `sway`)
 // trail: the maps are drawn as PairDiff gives them: N is the union of the places a set had in the pictures aged 80 to 320 ms (a streak when it moves)
-export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, rowAmp = 150, ringAmp = 110, dropArcs = [], dropRow = [], distractors = 3, distractorAmp = 70, ghosts = true, seed = 1, shift = null, trail = false, rowZ = 0, rowGains = null, rowOffset = 0 }) {
+export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, rowAmp = 150, ringAmp = 110, dropArcs = [], dropRow = [], distractors = 3, distractorAmp = 70, ghosts = true, seed = 1, shift = null, trail = false, rowZ = 0, rowGains = null, rowOffset = 0, holes = [] }) {
+  // holes: [{ X, Y, Z, set: 'ring' | 'row', amp }]: a hole in the side of the body that lets the light of a set out: a blob that blinks with the set, at a point of the
+  // side wall (Z below the top plane), in P while the set is lit and in the trail N after it
   const h = Math.round((w * 720) / FRAME_W), k = w / FRAME_W, rnd = rng(seed);
   const rowSet = [0, 1, 2, 3].map((j) => (group % 2) + 2 * j), arcSet = [0, 1, 2, 3, 4, 5, 6, 7].filter((i) => i % 2 === circle);
   const camAt = (t) => { const p = path(t); return { cam: cameraAt(p.elev, p.azim, p.dist), dist: p.dist }; };
@@ -36,6 +38,14 @@ export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, ro
     const { cam, dist } = camAt(t), ppm = (1000 / dist) * k;
     return { ppm, row: rowSet.map((kk) => toPx(cam, ...rowMm(kk), rowZ)), ring: arcSet.map((i) => toPx(cam, ...ring(i))), ringIds: arcSet };
   };
+  const holePx = (t, hole) => { const { cam } = camAt(t); return toPx(cam, hole.X, hole.Y, hole.Z); };
+  function addHoles(t, P, N) {
+    for (const hole of holes) {
+      const rowSet = hole.set === 'row', litNow = rowSet ? lit(t) : !lit(t), amp = hole.amp ?? 120;
+      if (litNow) { const q = holePx(t, hole); paint(rowSet ? P.green : P.amber, w, h, q.x, q.y, 2.2, amp); }
+      for (let age = 80; age <= 320; age += 40) { const was = rowSet ? lit(t - age) : !lit(t - age); if (was) { const q = holePx(t - age, hole); paint(rowSet ? N.green : N.amber, w, h, q.x, q.y, 2.2, amp); } }
+    }
+  }
   function frame(t) {
     const now = points(t), before = points(t - HALF_MS);
     const P = { green: new Uint8Array(w * h), amber: new Uint8Array(w * h) }, N = { green: new Uint8Array(w * h), amber: new Uint8Array(w * h) };
@@ -51,6 +61,7 @@ export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, ro
         if (rowLit) drawRow(N.green, o.row, o.ppm); else drawRing(N.amber, o.ring, o.ppm, o.ringIds);
       }
       for (let i = 0; i < distractors; i++) for (const map of [P.green, N.green, P.amber, N.amber]) paint(map, w, h, rnd() * w, rnd() * h, 2, distractorAmp * (0.4 + rnd() * 0.6));
+      addHoles(t, P, N);
       return { maps: { green: [P.green, N.green], amber: [P.amber, N.amber] }, w, h, truth: points(t), lit: lit(t) };
     }
     if (lit(t)) {
@@ -63,6 +74,7 @@ export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, ro
       if (ghosts && !lit(t - 100)) drawRing(N.amber, same.ring, same.ppm, same.ringIds);
     }
     for (let i = 0; i < distractors; i++) for (const map of [P.green, N.green, P.amber, N.amber]) paint(map, w, h, rnd() * w, rnd() * h, 2, distractorAmp * (0.4 + rnd() * 0.6));
+    addHoles(t, P, N);
     return { maps: { green: [P.green, N.green], amber: [P.amber, N.amber] }, w, h, truth: now, lit: lit(t) };
   }
   // what locate.js would give once it has found both sets: the corners of the square ordered around on the screen (starting at corner `shift`), the spots of the row along its line
@@ -78,5 +90,5 @@ export function makeScene({ w = 480, path, mirror = 1, group = 0, circle = 1, ro
     const row = p.row.map(jig).sort((a, b) => a.x * u.x + a.y * u.y - (b.x * u.x + b.y * u.y));
     return { ring: rot, row };
   }
-  return { w, h, frame, found, points, lit, rowSet, arcSet };
+  return { w, h, frame, found, points, lit, rowSet, arcSet, holePx };
 }

@@ -24,9 +24,10 @@
 // The maps P and N of pairdiff.js: P (what lit up since an older picture) is where a set is NOW, N (what went dark) is where it was 0.1 to 0.3 s ago.
 import { fitHomography, ransacHomography, applyH, scaleAt, compose } from './homography.js';
 import { blobNear } from './evidence.js';
-import { ring, legoPoint, rowName, ROW_GAP } from './layout.js';
+import { ring, legoPoint, rowName, ROW_GAP, SQUARE_SIDE } from './layout.js';
 
 export const FLOOR = 20;                        // a response under this is noise (0..255)
+export const HI_SHARE = 2.2;                    // a response above this many times the usual strength of its set is not a LED of it (a light out of a hole in the side of the body)
 export const TAU_SHARE = 0.2;                   // a place answers when its response is this share of the usual strength of its set (LEDs of a row differ a lot)
 export const TUNE = { beta: 0.7, reachK: 0.8 };   // beta: how much of what a picture says about the speed of the map is taken (alpha-beta filter); reachK: the share of speed x time the search reach carries
 export const OLD_AGE = 0.2;                     // s: the answers of the map N are 0.08 to 0.32 s old (pairdiff.js: references aged 0.4 to 1.6 half periods)
@@ -91,6 +92,8 @@ export function validMap(H, w, h) {
 }
 
 export class Tracker {
+  hi(colour) { return this.known[colour] ? HI_SHARE * this.signal[colour] : Infinity; }
+
   constructor() {
     this.mirror = 0;                            // 0: not known yet, +1 / -1 once an acquisition has chosen
     this.stats = {};                            // per place, over the whole session: see below (the report)
@@ -102,6 +105,7 @@ export class Tracker {
     this.coast = 0;
     this.rotation = null;
     this.signal = { green: 120, amber: 90 };    // how strong the sets answer: the floor follows
+    this.known = { green: false, amber: false };   // whether the strength above was measured on this robot in this view (until then nothing is refused for being too strong)
     this.v = { x: 0, y: 0 };                    // how fast the map moves in the picture (px/s): the places are predicted with it
     this.t = null;                              // time of the last picture (ms)
     this.ringT = null;                          // time of the last picture in which the ring corrected the map
@@ -111,6 +115,13 @@ export class Tracker {
     this.dt = 0;
     this.outside = 0;                           // pictures in a row in which the middle of the ring is outside the picture
     this.pending = null;                        // a map found from the ring alone: which way round it is (the row says) is not known yet
+  }
+
+  // Does the page need the spots of the whole picture (locate.js) for this picture? Not while the map is known and healthy: the places are asked where they are
+  // predicted, and the whole picture holds lights that are not LEDs (a light that comes out of a hole in the side of the body blinks like one). Yes with no map, a map
+  // waiting for its row, one that is struggling (a correction missed), or one that has not had a full fit of the ring for a while (a refresh may be needed).
+  wantsFound(t) {
+    return !this.H || !!this.pending || this.coast > 2 || (t != null && this.ringFullT != null && t - this.ringFullT > 0.4 * REFRESH_MS);
   }
 
   // the picture is analysed at another size (the same view, more or fewer pixels): the map and the speed are in pixels, they follow
@@ -136,7 +147,7 @@ export class Tracker {
     if (!this.H) {
       // a map starts from the ring alone, seen in this very picture (the spots of locate.js are as old as the map they came from: up to 0.3 s for the set
       // that is dark, and a hand at 100 px/s moves 30 px in that time): the 4 arcs fix the map up to a quarter turn, and the row, when it is lit, says which
-      acquired = this.acquireRing(found, { maps, w, h, circle });
+      acquired = this.acquireRing(found, { maps, w, h, circle, group });
       state = acquired ? 'acquire' : 'lost';
       if (acquired && !validMap(this.H, w, h)) { this.H = null; acquired = false; this.nInvalid = (this.nInvalid || 0) + 1; }
       if (!acquired) return this.result('lost', [], null);
@@ -145,7 +156,11 @@ export class Tracker {
       // three arcs have corrected the map for a second (an affine correction cannot repair the shape of the map: one wrong fit once is kept for good): a
       // full square of fresh corners, if there is one, starts the map again, from the ring; the row says again which way round it is
       const v = this.v, old = this.H, rot0 = this.rotation, seen0 = this.seen;
-      if (this.acquireRing(found, { maps, w, h, circle, need: 4 })) {
+      // ... a square NEAR the places the map gives (each corner within 0.6 side of a different place of the ring): the refresh repairs the shape of a map, it does not
+      // look for the robot again (a light from a hole in the side of the body can make a square with three arcs)
+      const sidePx = SQUARE_SIDE * scaleAt(old, 0, 26), ringNow = expectedPoints({ group, circle, mirror: this.mirror || 1 }).filter((q) => q.set === 'ring').map((q) => applyH(old, q.X, q.Y));
+      const near = (sq) => { const used = new Set(); return sq.every((c) => { let bi = -1, bd = 0.6 * sidePx; ringNow.forEach((q, i) => { const d = Math.hypot(q.x - c.x, q.y - c.y); if (d < bd && !used.has(i)) { bd = d; bi = i; } }); if (bi < 0) return false; used.add(bi); return true; }); };
+      if (this.acquireRing(found, { maps, w, h, circle, need: 4, accept: near, group })) {
         this.rotation = rot0; this.seen = seen0; this.v = v; this.ringT = t; this.fixT = t; this.ringFullT = t; state = 'acquire'; acquired = true; this.refreshed = true;
         if (rot0 !== null) {
           // the quarter turn the map had is kept: the one for which the row falls where the old map put it (the others turn it by 58 mm or more)
@@ -227,7 +242,17 @@ export class Tracker {
         const vx = this.v.x + (TUNE.beta * (b.x - a.x)) / dt, vy = this.v.y + (TUNE.beta * (b.y - a.y)) / dt, sp = Math.hypot(vx, vy), cap = 1.2 * Math.max(w, h);
         this.v = sp > cap ? { x: (vx * cap) / sp, y: (vy * cap) / sp } : { x: vx, y: vy };
       }
-      for (const o of hit) this.signal[o.colour] = Math.min(255, 0.9 * this.signal[o.colour] + 0.1 * o.v);
+      // the usual strength of a set: only answers that are strong enough to be the set's own pull it (a handful of weak stray answers must not lower it: the lower
+      // it is, the more strays are accepted), and it comes down slowly when the lights really are dimmer
+      for (const colour of ['green', 'amber']) {
+        const mine = hit.filter((o) => o.colour === colour && o.blob.map === 0);
+        if (!this.known[colour] && mine.length >= 2) {              // the first answers of the set say how strong it is (the middle one: a stray among them does not count)
+          const vs = mine.map((o) => o.v).sort((a, b) => a - b);
+          this.signal[colour] = Math.max(FLOOR, vs[vs.length >> 1]); this.known[colour] = true;
+        }
+      }
+      for (const o of hit) if (o.v >= 0.5 * this.signal[o.colour] && o.v <= (this.known[o.colour] ? HI_SHARE : 4) * this.signal[o.colour]) this.signal[o.colour] = Math.min(255, 0.9 * this.signal[o.colour] + 0.1 * o.v);
+      this.signal.green *= 0.998; this.signal.amber *= 0.998;
       if (state !== 'acquire') state = 'track';
     } else {
       this.coast++;
@@ -283,9 +308,14 @@ export class Tracker {
       const s0 = places.reduce((a, p) => a + p.s, 0) / places.length, colour = places[0].colour;
       if (!Number.isFinite(s0) || s0 <= 0 || s0 > 80) continue;
       const tau = Math.max(FLOOR, TAU_SHARE * this.signal[colour]), cap = Math.max(2 * tau, 1.2 * this.signal[colour]);
-      const reach = Math.min(set === 'row' ? 1.4 * ROW_GAP * s0 : 33 * s0, ((set === 'row' ? 6 : 10) * s0 + 2) + TUNE.reachK * speed * since);
-      const top = slide(maps[colour][0], w, h, places, { tau, cap, reach });
-      if (top && top.count >= (set === 'row' ? 2 : 3) && (!best || top.score > best.score)) best = { set, ...top };
+      // once the map is known the LEDs are near where it says: the reach grows only with the speed of the phone and the time since the last correction (the cap
+      // is a neighbour's distance: a LED of the row is 16 mm from the next, an arc 37 mm from the next). A light that comes out of a hole in the side of the body
+      // is a blinking spot like a LED, but not near a place.
+      const reach = Math.min(set === 'row' ? 1.4 * ROW_GAP * s0 : 0.9 * SQUARE_SIDE * s0, ((set === 'row' ? 6 : 10) * s0 + 2) + TUNE.reachK * speed * since);
+      const top = slide(maps[colour][0], w, h, places, { tau, cap, reach, hi: this.hi(colour) });
+      // two LEDs of the row are enough only for a small shift (a dim row); more LEDs, a larger one
+      const small = top && Math.hypot(top.dx, top.dy) <= 0.4 * ROW_GAP * s0;
+      if (top && (set === 'row' ? top.count >= 3 || (top.count === 2 && small) : top.count >= 3) && (!best || top.score > best.score)) best = { set, ...top };
     }
     return best;
   }
@@ -303,7 +333,7 @@ export class Tracker {
       const s0 = places.reduce((a, p) => a + p.s, 0) / places.length;
       if (!Number.isFinite(s0) || s0 <= 0 || s0 > 80) continue;
       const reach = Math.min(1.4 * ROW_GAP * s0, 6 * s0 + 5 + TUNE.reachK * speed * since);
-      const top = slide(P, w, h, places, { tau, cap, reach });
+      const top = slide(P, w, h, places, { tau, cap, reach, hi: this.hi('green') });
       if (top && top.count >= 2) opts.push({ ...top, mirror, rot, H: Hk, d: Math.hypot(top.dx, top.dy) });
     }
     if (!opts.length) return false;
@@ -331,12 +361,14 @@ export class Tracker {
       // P is where the set IS (fresh), N where it WAS. The real maps are the max over several older pictures, so a set that is lit now shows in N too,
       // at the place it had in an older picture of the same phase, and about as strong: when both answer, the fresh one is taken. A set that has just
       // gone dark answers in N only (P has only strays there, weaker): the stronger one then.
-      const fresh = blobNear([maps[p.colour][0]], w, h, px.x, px.y, r), old = blobNear([maps[p.colour][1]], w, h, px.x - OLD_AGE * v.x, px.y - OLD_AGE * v.y, ro);
+      const hi = this.hi(p.colour), fresh = blobNear([maps[p.colour][0]], w, h, px.x, px.y, r, { maxV: hi, choose: 'nearest', minV: tau }), old = blobNear([maps[p.colour][1]], w, h, px.x - OLD_AGE * v.x, px.y - OLD_AGE * v.y, ro, { maxV: hi });       // (the fresh answers fit the map: the NEAREST blob; the old ones only say that the set was there)
       let blob = null;
       if (fresh && old) blob = fresh.v >= 0.6 * old.v ? fresh : { ...old, map: 1 };
       else if (fresh) blob = fresh;
       else if (old) blob = { ...old, map: 1 };
-      obs.push({ ...p, px, r, blob, matched: !!blob && blob.v >= tau, v: blob ? blob.v : 0 });
+      // nothing above the floor near the place: the strongest response there all the same (below the floor: not an answer, but the report says how weak it is)
+      const weak = blob ? null : blobNear([maps[p.colour][0], maps[p.colour][1]], w, h, px.x, px.y, r);
+      obs.push({ ...p, px, r, blob, matched: !!blob && blob.v >= tau, v: blob ? blob.v : weak ? weak.v : 0 });
     }
     // two places never share an answer (a big glow between two arcs, the radius of an old answer reaching the neighbour: the LEDs of the row are 10 px apart
     // at 70 cm): the blob belongs to the nearer place. Two places on one blob would make a fit that 4 points satisfy and that is not a map.
@@ -364,8 +396,8 @@ export class Tracker {
   // The first map, from the ring alone. found.rings: the candidate squares, each the 4 corners of the square of arcs ordered around on the screen (one when
   // 4 arcs were found; when only 3 were, one per hypothesis for the fourth: locate.js). The corners must be FRESH: the map P of the amber must answer near
   // at least 3 of them (the spots of a set that is dark come from the map N and are old: they are not used, the next picture will do).
-  acquireRing(found, { maps, w, h, circle, need = 3 }) {
-    const squares = found && (found.rings || (found.ring ? [found.ring] : [])).filter((q) => q && q.length === 4);
+  acquireRing(found, { maps, w, h, circle, need = 3, accept = null, group = 0 }) {
+    const squares = found && (found.rings || (found.ring ? [found.ring] : [])).filter((q) => q && q.length === 4 && (!accept || accept(q)));
     if (!squares || !squares.length) return false;
     const ids = ringIds(circle), P = maps.amber[0], tau = Math.max(FLOOR, 0.3 * this.signal.amber);
     let best = null;
@@ -373,24 +405,49 @@ export class Tracker {
       const fresh = square.filter((c) => peakNear(P, w, h, c.x, c.y, 3) >= tau).length;
       if (fresh < need) continue;
       const H = fitHomography(square.map((_, j) => { const [X, Y] = ring(ids[j]); return { x: X, y: Y }; }), square.map((c) => ({ x: c.x, y: c.y })));
-      if (H && (!best || fresh > best.fresh)) best = { H, fresh };
+      if (!H || !rowCompatible(H, found && found.row, group, this.mirror || 1)) continue;
+      if (!best || fresh > best.fresh) best = { H, fresh, square };
     }
     if (!best) return false;
+    const vals = best.square.map((c) => peakNear(P, w, h, c.x, c.y, 3)).sort((a, b) => a - b);
+    this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true;       // the strength of the ring, on this robot, in this view: the middle two of the four
     this.H = best.H; this.rotation = null; this.coast = 0; this.seen = {};
     return true;
   }
 }
 
+// Is the row the detector sees (3 or 4 spots on a line) compatible with a map made from the ring alone? For one of the four quarter turns of the plane, the line of
+// the row has the direction the map gives to the lateral axis of the robot (within 15 degrees) and its LEDs the spacing the map gives to 16 mm (within 40 %). Direction
+// and spacing do not depend on where the spots are, so they are not spoilt by the age of the spots (a set that is dark is seen from the map N). A square that has a
+// stray light for one corner makes a map whose row is rarely right. No row seen: nothing to check against.
+export function rowCompatible(H, row, group, mirror = 1) {
+  if (!row || row.length < 3) return true;
+  const pts = row.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  const first = pts[0], last = pts[pts.length - 1], len = Math.hypot(last.x - first.x, last.y - first.y);
+  if (len < 1e-6) return true;
+  const gaps = []; for (let i = 1; i < pts.length; i++) gaps.push(Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  const gap = pts.length === 4 ? len / 3 : Math.min(...gaps), ang = Math.atan2(last.y - first.y, last.x - first.x);
+  const row0 = expectedPoints({ group, circle: -1, mirror }), cx = row0.reduce((a, p) => a + p.X, 0) / row0.length, cy = row0[0].Y;
+  for (let k = 0; k < 4; k++) {
+    const Hk = k ? compose(H, planeRotation(k)) : H;
+    const a = applyH(Hk, cx - ROW_GAP / 2, cy), b = applyH(Hk, cx + ROW_GAP / 2, cy);
+    const g = Math.hypot(b.x - a.x, b.y - a.y);
+    let d = Math.abs(Math.atan2(b.y - a.y, b.x - a.x) - ang) % Math.PI; d = Math.min(d, Math.PI - d);
+    if (d <= (15 * Math.PI) / 180 && g > 0 && gap / g > 0.6 && gap / g < 1.6) return true;
+  }
+  return false;
+}
+
 // the map slid: the shift (within `reach` px) at which the places have the most under them in the picture P (see Tracker.snap). places: [{ px: {x, y} }]
-export function slide(P, w, h, places, { tau, cap, reach }) {
+export function slide(P, w, h, places, { tau, cap, reach, hi = Infinity }) {
   // bounded whatever it is given: a reach from a map that went wrong must not turn into a loop of millions of shifts
   if (!(reach > 0) || !places.length || !places.every((p) => Number.isFinite(p.px.x) && Number.isFinite(p.px.y))) return null;
   reach = Math.min(reach, 0.2 * Math.max(w, h), 80);
   const R = Math.max(2, Math.ceil(reach));
-  const peak = (x, y) => {
+  const peak = (x, y, maxV) => {
     const cx = Math.round(x), cy = Math.round(y);
     let m = 0;
-    for (let yy = cy - 1; yy <= cy + 1; yy++) for (let xx = cx - 1; xx <= cx + 1; xx++) if (xx >= 0 && yy >= 0 && xx < w && yy < h && P[yy * w + xx] > m) m = P[yy * w + xx];
+    for (let yy = cy - 1; yy <= cy + 1; yy++) for (let xx = cx - 1; xx <= cx + 1; xx++) if (xx >= 0 && yy >= 0 && xx < w && yy < h) { const q = P[yy * w + xx]; if (q > m && q <= maxV) m = q; }
     return m;
   };
   let top = null;
@@ -398,7 +455,7 @@ export function slide(P, w, h, places, { tau, cap, reach }) {
     const d = Math.hypot(dx, dy);
     if (d > reach) return;
     let score = 0, count = 0;
-    for (const p of places) { const v = peak(p.px.x + dx, p.px.y + dy); score += Math.min(v, cap) / cap; if (v >= tau) count++; }
+    for (const p of places) { const v = peak(p.px.x + dx, p.px.y + dy, hi); score += Math.min(v, cap) / cap; if (v >= tau) count++; }
     score -= 0.2 * (d / reach);
     if (!top || score > top.score) top = { dx, dy, count, score };
   };

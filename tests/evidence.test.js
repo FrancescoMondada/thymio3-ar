@@ -61,3 +61,15 @@ test('near the border of the picture: no crash, the part inside is looked at', (
   assert.ok(blobNear([P, N], W, H, 0, 0, 8));
   assert.equal(blobNear([P, N], W, H, -50, -50, 8), null);
 });
+
+test('nearest: the blob nearest to the expected place is taken, not the strongest one a few px away; and responses above maxV are ignored', () => {
+  const w = 60, h = 40, a = new Uint8Array(w * h), put = (cx, cy, v) => { for (let y = cy - 1; y <= cy + 1; y++) for (let x = cx - 1; x <= cx + 1; x++) a[y * w + x] = v; };
+  put(30, 20, 90);                       // the LED, 2 px from the place
+  put(37, 20, 250);                      // a light out of a hole, 7 px from it, much stronger
+  assert.ok(Math.abs(blobNear([a], w, h, 28, 20, 10).x - 37) < 1.5, 'the strongest is the hole');
+  const near = blobNear([a], w, h, 28, 20, 10, { choose: 'nearest', minV: 20 });
+  assert.ok(Math.abs(near.x - 30) < 1.5 && near.v === 90, `nearest ${near.x}`);
+  const capped = blobNear([a], w, h, 28, 20, 10, { maxV: 150 });
+  assert.ok(Math.abs(capped.x - 30) < 1.5, 'the hole is above maxV');
+  assert.equal(blobNear([a], w, h, 28, 20, 10, { choose: 'nearest', minV: 20, maxV: 50 }), null, 'nothing between minV and maxV');
+});

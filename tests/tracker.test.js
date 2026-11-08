@@ -204,6 +204,28 @@ test('the tracker keeps statistics per place: how often it answers when its set 
   for (const id of ids) assert.ok(tr.stats[id].lit > 20 && tr.stats[id].hit / tr.stats[id].lit > 0.9, `${id}: ${tr.stats[id].hit}/${tr.stats[id].lit}`);
 });
 
+test('a light that comes out of a hole in the side of the body (brighter than the arcs, a few px from one of them in the picture) is not taken for an arc, nor for a LED of the row', () => {
+  const farPath2 = (t) => ({ elev: 50 + 10 * Math.sin((t / 1000) * 0.5) + 3 * Math.sin((t / 1000) * 1.7), azim: 100 + 25 * Math.sin((t / 1000) * 0.7), dist: 480 * (1 + 0.1 * Math.sin((t / 1000) * 0.3)) });
+  const scene = makeScene({ w: 640, path: farPath2, rowAmp: 90, ringAmp: 150, shift: swayShift(50), trail: true, holes: [{ X: 52, Y: 42, Z: -12, set: 'ring', amp: 255 }, { X: 53, Y: -4, Z: -12, set: 'row', amp: 255 }] });
+  const { out } = run(scene, { frames: 14 * 40, fps: 14, jitter: 30, stale: true, sets: true });
+  assert.ok(share(out, (o) => o.tracking) >= 0.97, `${pct(share(out, (o) => o.tracking))} tracked`);
+  assert.ok(share(out, (o) => o.err < 12) >= 0.95, `the places within 12 px in ${pct(share(out, (o) => o.err < 12))}`);
+  assert.ok(share(out, (o) => o.complete) >= 0.9, `${pct(share(out, (o) => o.complete))} complete`);
+});
+
+test('the whole picture is searched only when the map needs it: no map, a map waiting for its row, one that struggles, one without a full fit of the ring for a while', () => {
+  const scene = makeScene({ path: swayPath() }), tr = new Tracker();
+  assert.equal(tr.wantsFound(T0), true, 'no map');
+  const { out, tr: t2 } = run(scene, { frames: 60, tracker: tr });
+  const last = out[out.length - 1].t;
+  assert.equal(t2.wantsFound(last), false, 'a healthy map');
+  assert.equal(t2.wantsFound(last + 600), true, 'no full ring fit for 0.6 s');
+  t2.coast = 3;
+  assert.equal(t2.wantsFound(last), true, 'struggling');
+  t2.coast = 0; t2.pending = { t0: last, n: 0 };
+  assert.equal(t2.wantsFound(last), true, 'waiting for the row');
+});
+
 test('the speed of the map is learned from the pictures, and predicts where the places are: at 100 px a second the predicted places are within 3 px at every picture', () => {
   const scene = makeScene({ w: 640, path: (t) => ({ elev: 60, azim: 100, dist: 700 }), rowAmp: 60, ringAmp: 200, shift: (t) => ({ x: 200 * ((t - T0) / 1000), y: 0 }), trail: true });   // 100 px a second at 640
   const { out } = run(scene, { frames: 16 * 3, fps: 16, jitter: 0, sets: true });
