@@ -213,6 +213,16 @@
           <p class="note" id="robotNote"></p>
         </section>
         <section>
+          <h2>Enregistrement de la caméra</h2>
+          <p class="note" style="margin:0 0 6px">Pour que le test puisse être rejoué sur l'ordinateur avec les vraies images : lancez le robot, commencez l'enregistrement, filmez 20 à 30 s comme pour un test, arrêtez, puis <b>partagez les deux fichiers</b> (la vidéo et le rapport). Cela enregistre ce que la caméra voit, pas l'écran.</p>
+          <button id="rec" disabled style="width:100%">● Enregistrer la vidéo de la caméra</button>
+          <div class="grid2" id="recDone" style="display:none; margin-top:6px">
+            <button id="recShare" class="primary">Partager la vidéo et le rapport</button>
+            <button id="recSave">Enregistrer sur le téléphone</button>
+          </div>
+          <p class="note" id="recNote"></p>
+        </section>
+        <section>
           <h2>Rapport</h2>
           <button id="copy" style="width:100%">Copier le rapport</button>
           <pre id="report"></pre>

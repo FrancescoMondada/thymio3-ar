@@ -2,3 +2,4 @@ node_modules
 dist
 photos/
 .DS_Store
+recordings/

@@ -4,7 +4,7 @@
 
 import { SpotFinder } from './detect.js';
 import { Rolling, Rate, fmt } from './stats.js';
-import { startCamera, exposureInfo, setExposure } from './camera.js';
+import { startCamera, startReplay, exposureInfo, setExposure } from './camera.js';
 import { CameraWatch, pickSettings, capabilitiesText, SHOWN } from './camwatch.js';
 import { startDemo } from './demo.js';
 import { viewAngleDeg, AngleTable } from './angle.js';
@@ -18,7 +18,9 @@ import { nextSize } from './autosize.js';
 import { Tracker, FLOOR } from './tracker.js';
 import { RangeGuide, RANGE, normalise } from './range.js';
 import { searchThreshold } from './search.js';
-import { ROW_GAP, discWindow } from './layout.js';
+import { ROW_GAP, RING, discWindow } from './layout.js';
+import { applyH } from './homography.js';
+import { Recorder, Trace, shareFiles, saveFile, stampOf } from './recorder.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript, isDual } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
 
@@ -31,9 +33,13 @@ const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
 const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
 const tracker = new Tracker();
-tracker.fondOff = params.get('fond') === '0';
+tracker.fondOff = params.get('fond') !== '1';                       // the test of the background is OFF unless `?fond=1`: in the 19th report it dropped the real robot 14 times out of 18 losses
 const rangeGuide = new RangeGuide();                                  // too far / too near the robot: the user is told (range.js)
 const camWatch = new CameraWatch();                                  // what the camera and the screen change while the test runs (camwatch.js)
+const recorder = new Recorder();                                      // the camera stream, recorded to be replayed off the phone (recorder.js)
+const trace = new Trace();                                            // what this page decided picture by picture while it was recorded
+let recFiles = null, recMsg = '';
+const buildId = typeof __BUILD__ === 'string' ? __BUILD__.split(' ')[0] : 'dev';
 let camSettingsT = -1e9, camNoteTimer = null;
 function showCamNote(ev) {
   if (!ev || !SHOWN.has(ev.kind)) return;
@@ -41,7 +47,7 @@ function showCamNote(ev) {
   el.textContent = `Changement : ${ev.text}`; el.style.display = 'block';
   clearTimeout(camNoteTimer); camNoteTimer = setTimeout(() => { el.style.display = 'none'; }, 5000);
 }
-const noteChange = (kind, text) => showCamNote(camWatch.note(performance.now(), kind, text));
+const noteChange = (kind, text) => { showCamNote(camWatch.note(performance.now(), kind, text)); trace.event(performance.now(), `${kind} : ${text}`); };
 document.addEventListener('visibilitychange', () => { if (state.cam) noteChange('page', document.hidden ? 'page passée en arrière-plan' : 'page revenue au premier plan'); });
 let rangeShown = '';                                       // the map of the robot's plane to the picture, tracked (tracker.js)
 const trackLog = { acquisitions: 0, losses: 0, refreshes: 0, lostBy: {}, acqFails: {}, lossScales: [], state: 'idle', rotation: null, recent: [] };       // recent: what the last pictures did (for the console: window.thymioAR)
@@ -131,6 +137,15 @@ addEventListener('deviceorientation', (e) => {
 // ---- the loop: one pass per camera frame ---------------------------------------------------------------
 function schedule(cam) {
   const v = cam.video;
+  if (cam.replay) {                                           // a recording played again: the clock is the time of the video
+    if (cam.finished) { window.thymioAR.replayDone = true; return; }
+    v.requestVideoFrameCallback((now, meta) => {
+      if (++cam.n % cam.every) { schedule(cam); return; }
+      const ms = meta.mediaTime * 1000;
+      tick(cam, ms, { ...meta, captureTime: ms });
+    });
+    return;
+  }
   if (v.requestVideoFrameCallback) v.requestVideoFrameCallback((now, meta) => tick(cam, now, meta));
   else requestAnimationFrame((now) => tick(cam, now, {}));
 }
@@ -188,7 +203,7 @@ function tickBody(cam, now, meta) {
     // what the camera and the screen do: the size of the picture, of the window, the orientation of the screen, and (about once a second) the settings of the track
     const snap = { frame: `${vw}x${vh}`, window: `${innerWidth}x${innerHeight}`, orientation: (screen.orientation && screen.orientation.type) || (innerWidth > innerHeight ? 'landscape' : 'portrait') };
     if (now - camSettingsT > 1000) { camSettingsT = now; try { Object.assign(snap, pickSettings(cam.track && cam.track.getSettings && cam.track.getSettings())); } catch { /* the settings are not readable: nothing to note */ } }
-    for (const ev of camWatch.observe(now, snap)) showCamNote(ev);
+    for (const ev of camWatch.observe(now, snap)) { showCamNote(ev); trace.event(now, `${ev.kind} : ${ev.text}`); }
     if (canvas.width !== W || canvas.height !== H) {
       const oldW = canvas.width, oldH = canvas.height, had = !!tracker.H;
       canvas.width = W; canvas.height = H;
@@ -354,6 +369,7 @@ function tickBody(cam, now, meta) {
       if (Number.isFinite(sceneScale)) d.scale.push(sceneScale);
     }
     win.last = { ...res, spots: counted, found: res.spots, aligned, square, loc, tracker: tr };
+    if (trace.active && !res.waiting) traceRow(meta.captureTime != null ? meta.captureTime : now, tr, W, H);
     if (loc) maybeAutoSize(now);
     if (meta.presentedFrames != null) {
       win.frames.push([now, meta.presentedFrames]);
@@ -363,6 +379,21 @@ function tickBody(cam, now, meta) {
     else if (meta.receiveTime != null) { win.latency.push(now - meta.receiveTime); win.latencyKind = 'réception'; }
   }
   schedule(cam);
+}
+
+// one row of the trace of the recording (recorder.js): what the tracker said for this picture, and where it put the ring
+let traceState = null;
+function traceRow(tt, tr, W, H) {
+  const trk = !!(tr && tr.tracking);
+  let cx = null, cy = null, sc = null;
+  if (trk && tr.H) {
+    const q = applyH(tr.H, RING.cx, RING.cy);
+    if (q && Number.isFinite(q.x) && Number.isFinite(q.y)) { cx = Math.round((1000 * q.x) / W) / 1000; cy = Math.round((1000 * q.y) / H) / 1000; }
+    if (Number.isFinite(tr.scale)) sc = Math.round(100 * normalise(tr.scale, W, H)) / 100;
+  }
+  const letter = tr ? tr.state[0] : 'i', m = currentMotion(), a = currentAngle();
+  if (letter !== traceState) { trace.event(tt, `${traceState || '-'} -> ${letter}${letter === 'l' && tr.lostBy ? ` (${tr.lostBy})` : ''}`); traceState = letter; }
+  trace.add(tt, [letter, cx, cy, sc, tr ? tr.rowConfirmed : null, tr ? tr.ringConfirmed : null, Number.isFinite(m) ? Math.round(m) : null, Number.isFinite(a) ? Math.round(a) : null, W, H]);
 }
 
 // the squares the tracker may start from: the 4 corners when 4 arcs were found; when 3 were, one square per hypothesis for the fourth (locate.js), the
@@ -559,8 +590,56 @@ function refreshPanel() {
     ? `${cam.label || 'caméra'} · ${cam.settings.width || win.frameW}×${cam.settings.height || win.frameH}` +
       `${cam.settings.frameRate ? ` à ${Math.round(cam.settings.frameRate)} /s` : ''} · analysée en ${canvas.width}×${canvas.height}`
     : '–';
+  syncRecording();
   $('report').textContent = report();
 }
+
+// ---- the recording of the camera ------------------------------------------------------------------------
+function syncRecording() {
+  const recording = recorder.state === 'recording';
+  $('rec').disabled = !recorder.supported || !state.cam || !state.cam.stream;
+  $('rec').textContent = recording ? `■ Arrêter l'enregistrement (${(recorder.elapsed() / 1000).toFixed(0)} s)` : '● Enregistrer la vidéo de la caméra';
+  $('rec').classList.toggle('on', recording);
+  $('recDone').style.display = recFiles && !recording ? '' : 'none';
+  $('recNote').textContent = recMsg || (!recorder.supported ? 'Ce navigateur ne sait pas enregistrer la vidéo de la caméra.'
+    : !state.cam ? 'Démarrez d\'abord la caméra (et le robot).'
+    : recording ? `Enregistrement en cours (arrêt automatique à ${recorder.maxMs / 1000} s) : filmez le robot comme pour un test.`
+    : recFiles ? `Enregistré : ${recorder.line()}. Deux fichiers à partager : la vidéo et le rapport (.txt).` : '');
+}
+
+function toggleRecording() {
+  if (recorder.state === 'recording') { recorder.stop(); return; }
+  if (!state.cam || !state.cam.stream) return;
+  try {
+    recFiles = null; recMsg = '';
+    const t0 = performance.now();
+    recorder.start(state.cam.stream);
+    trace.begin(t0); traceState = null;
+    recorder.done.then(finishRecording);              // the button, the longest length, or the end of the camera
+  } catch (err) { recMsg = `Enregistrement impossible : ${err?.message || err}`; }
+  syncRecording();
+}
+
+function finishRecording() {
+  const res = recorder.result;
+  if (!res || !res.bytes) { recMsg = `Enregistrement vide : rien à partager.${recorder.error ? ` (${recorder.error})` : ''}`; trace.reset(); syncRecording(); return; }
+  const name = `thymio-ar-${buildId}-${stampOf()}`;
+  recFiles = [new File([res.blob], `${name}.${res.ext}`, { type: res.blob.type }), new File([trace.toText(report())], `${name}.txt`, { type: 'text/plain' })];
+  trace.reset();
+  syncRecording();
+}
+
+$('rec').onclick = toggleRecording;
+$('recShare').onclick = async () => {
+  if (!recFiles) return;
+  try {
+    const done = await shareFiles(recFiles);
+    if (done) recMsg = 'Fichiers partagés.';
+    else { recFiles.forEach((f) => saveFile(f)); recMsg = 'Ce navigateur ne partage pas de fichiers : ils sont dans les téléchargements.'; }
+  } catch (err) { recMsg = err && err.name === 'AbortError' ? 'Partage annulé : le bouton reste là.' : `Partage impossible (${err?.message || err}) : essayez « Enregistrer sur le téléphone ».`; }
+  syncRecording();
+};
+$('recSave').onclick = () => { if (!recFiles) return; recFiles.forEach((f) => saveFile(f)); recMsg = 'Fichiers enregistrés dans les téléchargements du téléphone.'; syncRecording(); };
 
 function exposureText() {
   if (!state.cam) return 'n/d';
@@ -595,13 +674,14 @@ function report() {
     `caméra: ${state.cam ? `${state.cam.label} ${state.cam.settings.width}x${state.cam.settings.height} @${state.cam.settings.frameRate ?? '?'}` : 'non démarrée'}${state.demo ? ' (SCÈNE SIMULÉE)' : ''}`,
     `changements de la caméra et de l'écran: ${camWatch.line()}`,
     `caméra, capacités: ${capabilitiesText(state.cam && state.cam.capabilities)} ; orientation de l'écran: ${(screen.orientation && screen.orientation.type) || 'n/d'} ; réglages: ${(() => { try { return JSON.stringify(pickSettings(state.cam && state.cam.track && state.cam.track.getSettings && state.cam.track.getSettings())); } catch { return 'n/d'; } })()}`,
+    `enregistrement de la caméra: ${recorder.line()}`,
     `requestVideoFrameCallback: ${typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype ? 'oui' : 'non'}`,
     `Web Bluetooth: ${'bluetooth' in navigator ? 'oui' : 'non'}`,
     `détection: ${state.detect === 'track' ? `par suivi d'une carte du plan (différence de deux images, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${isDual(state.group, state.circle) ? ' dans le même flash, les deux flashs en alternance' : lineOn() && squareOn() ? ' en alternance' : ''}, seuils ${state.blinkThreshold}/${state.ringThreshold} pour l'acquisition)` : state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${lineOn() && squareOn() ? ' en alternance' : ''}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'}/${pdiffAmber.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
     `couleurs des points vus maintenant: ${colorsText(win.last.found || [])}`,
     `filtre d'alignement: ${alignOn() ? `oui ; ${(win.last.found || []).length} points trouvés, ${win.last.spots.length} retenus${win.last.aligned?.chosen.length ? ` (droite à ${fmt(win.last.aligned.angleDeg, 0)}°, écart à la droite ${fmt(win.last.aligned.rms, 1)} px, intervalles ${win.last.aligned.gaps.map((g) => fmt(g, 0)).join('/')} px)` : ''}` : 'non'}`,
     `carré des arcs: ${squareOn() ? `${win.last.spots.filter((sp) => sp.set === 'ring').length}/4 retenus${win.last.square?.full ? ` (côtés ${win.last.square.sides.map((v) => fmt(v, 0)).join('/')} px${win.last.square.vanishing ? `, parallélisme avec la rangée : écart ${fmt(win.last.square.vanishing.residual, 3)}` : ''})` : ''}` : 'non'}`,
-    `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.confirmed}/${win.last.tracker.expected} confirmés dans la dernière période, ${win.last.tracker.matched} répondent dans cette image (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched}), vitesse ${fmt(win.last.tracker.speed, 0)} px/s${win.last.tracker.diag && win.last.tracker.diag.fondRatio != null ? `, arcs éteints / arcs allumés ${fmt(win.last.tracker.diag.fondRatio, 2)} (médiane des 8 dernières images ; une carte posée sur un fond : au-dessus de 0,6)` : ''}${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s) dont ${trackLog.refreshes} reprise(s) depuis l'anneau, ${trackLog.reacq || 0} carte(s) remplacée(s) par un départ depuis l'image (${trackLog.reacqTries || 0} essais, carte en difficulté : ${Object.entries(trackLog.reacqWhy || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucun'}), ${trackLog.sizeResets || 0} carte(s) effacée(s) par un changement de forme de l'image, ${trackLog.losses} perte(s) (${Object.entries(trackLog.lostBy).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucune'}) ${tracker.fondOff ? ' ; TEST DU FOND DÉSACTIVÉ (?fond=0)' : ''} ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
+    `suivi de la carte: ${state.detect === 'track' ? `état ${trackLog.state}${win.last.tracker?.tracking ? `, échelle ${fmt(win.last.tracker.scale, 2)} px/mm, ${win.last.tracker.confirmed}/${win.last.tracker.expected} confirmés dans la dernière période, ${win.last.tracker.matched} répondent dans cette image (rangée ${win.last.tracker.rowMatched}, arcs ${win.last.tracker.ringMatched}), vitesse ${fmt(win.last.tracker.speed, 0)} px/s${win.last.tracker.diag && win.last.tracker.diag.fondRatio != null ? `, arcs éteints / arcs allumés ${fmt(win.last.tracker.diag.fondRatio, 2)} (médiane des 8 dernières images ; une carte posée sur un fond : au-dessus de 0,6)` : ''}${win.last.tracker.rms != null ? `, écart ${fmt(win.last.tracker.rms, 1)} px` : ''}` : ''} ; ${trackLog.acquisitions} acquisition(s) dont ${trackLog.refreshes} reprise(s) depuis l'anneau, ${trackLog.reacq || 0} carte(s) remplacée(s) par un départ depuis l'image (${trackLog.reacqTries || 0} essais, carte en difficulté : ${Object.entries(trackLog.reacqWhy || {}).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucun'}), ${trackLog.sizeResets || 0} carte(s) effacée(s) par un changement de forme de l'image, ${trackLog.losses} perte(s) (${Object.entries(trackLog.lostBy).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucune'}) ${tracker.fondOff ? ' ; test du fond : désactivé (défaut ; ?fond=1 pour l\'activer)' : ' ; TEST DU FOND ACTIF (?fond=1)'} ; carré tourné de ${trackLog.rotation ?? '?'} quart(s), rangée ${tracker.mirror > 0 ? 'dans le sens du plan' : tracker.mirror < 0 ? 'en miroir' : 'sens inconnu'}` : 'non'}`,
     ...(state.detect === 'track' ? [`places, quand leur jeu est allumé (réponse fraîche · images · force moyenne de la plus forte réponse proche · écart moyen des réponses aux places prédites en px) : ${Object.entries(tracker.stats).sort(([a], [b]) => a.localeCompare(b)).map(([id, st]) => `${id} ${st.lit ? Math.round((100 * st.hit) / st.lit) : 0} % · ${st.lit} · ${fmt(st.vall / Math.max(1, st.lit), 0)} · ${st.hit ? `${fmt(st.dx / st.hit, 1)},${fmt(st.dy / st.hit, 1)}` : 'n/d'}`).join(' ; ') || 'n/d'} ; force usuelle (rangée/arcs) ${fmt(tracker.signal.green, 0)}/${fmt(tracker.signal.amber, 0)}, seuil plancher ${FLOOR}`] : []),
     ...(trackLog.errors ? [`ERREURS dans le traitement d'une image : ${trackLog.errors}, la dernière : ${trackLog.lastError}`] : []),
     ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0}, recherche sur toute l'image évitée dans ${fmt((100 * (trackLog.lite || 0)) / Math.max(1, trackLog.pictures || 0), 0)} % des images ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
@@ -640,6 +720,7 @@ function friendly(err) {
 }
 
 function stopCamera() {
+  if (recorder.state === 'recording') recorder.stop();
   state.cam?.stop();
   state.cam = null;
 }
@@ -649,11 +730,13 @@ async function start(kind) {
   try {
     stopCamera();
     state.demo = kind === 'demo';
+    const replaying = kind === 'replay';
     state.facing = kind === 'front' ? 'user' : 'environment';
-    if (!state.demo) await enableOrientation();          // from the tap that started the camera
+    if (!state.demo && !replaying) await enableOrientation();          // from the tap that started the camera
     const elev = params.has('elev') ? Number(params.get('elev')) : null;
     const cam = state.demo
       ? await startDemo({ elev, blink: params.has('blink'), extra: params.has('extra'), shake: Number(params.get('shake') || 0), sway: Number(params.get('sway') || 0), dist: Number(params.get('dist') || 380), jumpEvery: Number((params.get('jump') || '').split(',')[0]) || 0, jumpFactor: Number((params.get('jump') || '').split(',')[1]) || 1, rowGain: params.has('rowgain') ? Number(params.get('rowgain')) : 1, rowShift: Number(params.get('rowmm') || 0), ringGain: params.has('ring') ? Number(params.get('ring')) : 1, dimArc: params.has('arcdim') ? Number(params.get('arcdim')) : -1, dimGain: params.has('dimgain') ? Number(params.get('dimgain')) : 0.12, halfMs: () => state.halfMs, group: () => state.group, ringSet: () => state.circle })
+      : replaying ? await startReplay(params.get('replay'), { rate: Number(params.get('rate') || 0.5), every: Number(params.get('every') || 2) })
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     camWatch.reset(); camSettingsT = -1e9;
@@ -664,7 +747,9 @@ async function start(kind) {
     resetAngles();
     $('splash').style.display = 'none';
     $('switchCam').disabled = state.demo;
+    recMsg = '';
     setupExposure();
+    if (replaying) { trace.begin(0); traceState = null; window.thymioAR.trace = trace; cam.video.addEventListener('ended', () => { window.thymioAR.replayDone = true; }); }
     schedule(cam);
   } catch (err) {
     $('err').textContent = friendly(err);
@@ -909,3 +994,4 @@ $('robot').disabled = !bluetoothOk();       // the robot can be lit with no came
 setInterval(refreshPanel, 250);
 refreshPanel();
 if (params.has('demo')) start('demo');
+else if (params.has('replay')) start('replay');

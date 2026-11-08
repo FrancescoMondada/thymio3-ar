@@ -43,6 +43,28 @@ export async function fromStream(stream, { label = '', stopExtra = () => {} } = 
   };
 }
 
+// A recording (recorder.js) played again in place of the camera, with the same <video> interface: the page then analyses the very pictures of a test made on a phone.
+// The clock is the time of the video, not the wall clock, so that a slow computer gives the same result as a fast one (the speed of the video is lowered: every picture
+// is delivered); `every` analyses one picture out of `every` (the phone analysed about 14 of its 30 pictures a second).
+export async function startReplay(url, { rate = 0.5, every = 2 } = {}) {
+  const video = document.createElement('video');
+  video.setAttribute('playsinline', '');
+  video.muted = true;
+  video.src = url;
+  video.playbackRate = rate;
+  Object.assign(video.style, { position: 'fixed', left: '0', top: '0', width: '2px', height: '2px', opacity: '0', pointerEvents: 'none' });
+  document.body.appendChild(video);
+  await video.play();
+  const cam = {
+    video, stream: null, track: null, label: 'ENREGISTREMENT REJOUÉ', replay: true, every: Math.max(1, every), n: 0, finished: false, rate,
+    settings: { width: video.videoWidth, height: video.videoHeight, frameRate: 30 },
+    capabilities: {},
+    stop() { video.pause(); video.removeAttribute('src'); video.remove(); },
+  };
+  video.addEventListener('ended', () => { cam.finished = true; });
+  return cam;
+}
+
 // What the camera says it can do about exposure, in words for the page.
 export function exposureInfo(cam) {
   const caps = cam.capabilities || {};
