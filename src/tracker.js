@@ -37,6 +37,9 @@ export const CONFIRM_MS = 450;                  // a place is confirmed if it an
 export const ZONE_MEMORY_S = 6;                 // after a loss the robot is looked for round where it was for this long; then everywhere
 export const OUTSIDE_PICTURES = 6;               // the middle of the ring has been outside the picture for this many pictures in a row: the robot is gone, the map is dropped
 export const RING_LOST_MS = 2000;               // ... and for this long: the map is lost (the row alone keeps a map alive by shifts, but cannot say how it is turned)
+export const STRUGGLE_MS = 500;                 // the dual flash: no full fit (6 of the 8 lit places agreeing) for this long: the map is struggling, a start from the picture is tried against it
+export const RETRY_MS = 250;                    // ... at most this often
+export const MIN_SCALE = 0.25;                  // px/mm for a picture 640 px long: a map smaller than this is not the robot (the 17th report: maps of 0.07 to 0.17 held for seconds, all the places on one blob)
 
 // the places of the LEDs of the group and of the arcs of the set, in the plane of the robot, for a layout of the row (mirror = +1 or -1).
 // Each place has `set` ('row' | 'ring': what it is), `key` (the set it belongs to) and `phase` (which flash lights it).
@@ -96,7 +99,7 @@ export function validMap(H, w, h) {
     scales.push(sc);
   }
   const mid = scales[0];
-  if (!(mid > 0.02 && mid < 0.1 * L)) return false;
+  if (!(mid * 640 / L > MIN_SCALE && mid < 0.1 * L)) return false;
   return scales.every((sc) => sc > mid / 8 && sc < mid * 8);
 }
 
@@ -129,6 +132,26 @@ export class Tracker {
     this.dt = 0;
     this.outside = 0;                           // pictures in a row in which the middle of the ring is outside the picture
     this.pending = null;                        // a map found from the ring alone: which way round it is (the row says) is not known yet
+    this.fullT = null;                          // time of the last picture in which 6 or more of the 8 places of the lit flash agreed in one fit (dual flash)
+    this.tryT = null;                           // time of the last start tried against a map that was struggling
+    this.lostBy = null;
+  }
+
+  // The map has not been confirmed by a full fit for a while (a jump of the zoom, a hand in front, a stray that holds it): worth a start from the picture, if it is
+  // not tried too often. Only with the dual flash, where the picture alone gives a whole map.
+  struggling(t) {
+    return !!this.dual && !!this.H && t != null && this.fullT != null && t - this.fullT > STRUGGLE_MS && (this.tryT == null || t - this.tryT >= RETRY_MS);
+  }
+
+  // how many of the 8 places of the flash `par` have a response under them in the fresh map (the same question for two maps: which one explains the picture better)
+  supportOf(H, mirror, par, { maps, w, h }, signal = this.signal) {
+    let n = 0;
+    for (const p of expectedPoints({ group: 4, circle: 2, mirror })) {
+      if (p.phase !== par) continue;
+      const q = applyH(H, p.X, p.Y), s = scaleAt(H, p.X, p.Y), tau = Math.max(FLOOR, TAU_SHARE * signal[p.colour]);
+      if (peakNear(maps[p.colour][0], w, h, q.x, q.y, Math.max(2, Math.ceil((p.set === 'row' ? 0.25 * ROW_GAP : 0.25 * SQUARE_SIDE) * s))) >= tau) n++;       // (a whole number of pixels: it bounds a loop over the picture)
+    }
+    return n;
   }
 
   // The robot is where it was: a map that is lost does not mean the robot went away, the phone moved a little. Where to look for it (the spots of the whole picture are
@@ -155,7 +178,7 @@ export class Tracker {
   // predicted, and the whole picture holds lights that are not LEDs (a light that comes out of a hole in the side of the body blinks like one). Yes with no map, a map
   // waiting for its row, one that is struggling (a correction missed), or one that has not had a full fit of the ring for a while (a refresh may be needed).
   wantsFound(t) {
-    if (this.dual) return !this.H || this.coast > 2;
+    if (this.dual) return !this.H || this.coast > 2 || this.struggling(t);
     return !this.H || !!this.pending || this.coast > 2 || (t != null && this.ringFullT != null && t - this.ringFullT > 0.4 * REFRESH_MS);
   }
 
@@ -181,14 +204,33 @@ export class Tracker {
     this.dt = dt;
     if (this.H && dt > 0) this.H = shifted(this.H, this.v.x * dt, this.v.y * dt);
     if (this.H && !validMap(this.H, w, h)) { this.H = null; this.coast = 0; this.pending = null; this.lostBy = 'invalide'; this.nInvalid = (this.nInvalid || 0) + 1; }
-    if (!this.H) {
+    this.reacquired = false; this.tried = false;
+    const tryAgain = this.struggling(t) && !!found && !!((found.rings && found.rings.length) || found.ring);
+    if (!this.H || tryAgain) {
       // a map starts from the ring alone, seen in this very picture (the spots of locate.js are as old as the map they came from: up to 0.3 s for the set
       // that is dark, and a hand at 100 px/s moves 30 px in that time): the 4 arcs fix the map up to a quarter turn, and the row, when it is lit, says which
+      // (a map that is struggling: the start is tried from this picture and replaces the map only if it explains more of the 8 lit places; the zoom jumped, and the old map
+      // held a half-fit at the wrong scale for as long as the robot stayed in view)
+      let keep = null;
+      if (tryAgain) {
+        this.tryT = t; this.tried = true;
+        keep = { H: this.H, mirror: this.mirror, rotation: this.rotation, phase: this.phase, coast: this.coast, seen: this.seen, signal: { ...this.signal }, known: { ...this.known }, vals: { green: this.vals.green.slice(), amber: this.vals.amber.slice() } };
+      }
       acquired = dual ? this.acquireDual(found, { maps, w, h }) : this.acquireRing(found, { maps, w, h, circle, group });
-      state = acquired ? 'acquire' : 'lost';
+      if (tryAgain) {
+        const sNew = acquired && validMap(this.H, w, h) ? this.supportOf(this.H, this.mirror, this.phase, { maps, w, h }) : -1, sOld = acquired ? this.supportOf(keep.H, keep.mirror, this.phase, { maps, w, h }, keep.signal) : -1;
+        const better = acquired && sNew > sOld;
+        this.tryInfo = { sNew, sOld, fail: this.acqFail, squares: ((found.rings || []).length), rows: ((found.rows || []).length), scaleOld: scaleAt(keep.H, 0, 26), scaleNew: acquired ? scaleAt(this.H, 0, 26) : null };
+        this.tryWhy = better ? 'ok' : acquired ? 'pas mieux' : (this.acqFail && this.acqFail.reason) || 'refusé';       // (kept for the report: why the starts tried against a struggling map came to nothing)
+        if (better) { this.reacquired = true; this.nReacq = (this.nReacq || 0) + 1; }
+        else { Object.assign(this, { H: keep.H, mirror: keep.mirror, rotation: keep.rotation, phase: keep.phase, coast: keep.coast, seen: keep.seen, signal: keep.signal, known: keep.known, vals: keep.vals }); acquired = false; }
+      } else state = acquired ? 'acquire' : 'lost';
       if (acquired && !validMap(this.H, w, h)) { this.H = null; acquired = false; this.nInvalid = (this.nInvalid || 0) + 1; }
-      if (!acquired) return this.result('lost', [], null);
-      this.v = { x: 0, y: 0 }; this.ringT = t; this.fixT = t; this.ringFullT = t; this.pending = dual ? null : { t0: t, n: 0 };
+      if (!acquired && !tryAgain) return this.result('lost', [], null);
+      if (acquired) {
+        if (!tryAgain) this.v = { x: 0, y: 0 };                       // (a map that replaces a struggling one keeps the speed the phone had)
+        this.ringT = t; this.fixT = t; this.ringFullT = t; this.fullT = t; this.pending = dual ? null : { t0: t, n: 0 };
+      }
     } else if (!dual && found && !this.pending && t != null && this.ringFullT != null && t - this.ringFullT > REFRESH_MS) {
       // three arcs have corrected the map for a second (an affine correction cannot repair the shape of the map: one wrong fit once is kept for good): a
       // full square of fresh corners, if there is one, starts the map again, from the ring; the row says again which way round it is
@@ -265,7 +307,7 @@ export class Tracker {
       if (fit) {
         this.H = fit.H; rms = fit.rms; updated = true; ringFixed = true;
         fresh.forEach((o, i) => { o.inlier = fit.inliers.includes(i); });
-        if (t != null) this.ringFullT = t;
+        if (t != null) { this.ringFullT = t; if (fit.inliers.length >= 6) this.fullT = t; }
       }
     }
     if (!updated && freshRing.length >= 4) {
@@ -454,7 +496,7 @@ export class Tracker {
     const row = scope.filter((o) => o.set === 'row'), ringPts = scope.filter((o) => o.set === 'ring');
     const ok = (o) => o.matched && o.inlier !== false;
     return {
-      state, tracking: !!this.H && state !== 'lost', H: this.H, mirror: this.mirror, rotation: this.rotation, rms, speed: Math.hypot(this.v.x, this.v.y), invalid: this.nInvalid || 0, pending: !!this.pending, refreshed: !!this.refreshed, lostBy: state === 'lost' ? this.lostBy || null : null,
+      state, tracking: !!this.H && state !== 'lost', H: this.H, mirror: this.mirror, rotation: this.rotation, rms, speed: Math.hypot(this.v.x, this.v.y), invalid: this.nInvalid || 0, pending: !!this.pending, refreshed: !!this.refreshed, reacquired: !!this.reacquired, tried: !!this.tried, tryWhy: this.tried ? this.tryWhy : null, reacquisitions: this.nReacq || 0, lostBy: state === 'lost' ? this.lostBy || null : null,
       phase: this.dual ? (this.phase ?? 0) : null, dual: !!this.dual, acqFail: this.H ? null : this.acqFail || null,
       scale: this.H ? scaleAt(this.H, 0, 26) : NaN, points: obs,
       expected: scope.length, matched: scope.filter(ok).length, rowMatched: row.filter(ok).length, ringMatched: ringPts.filter(ok).length,

@@ -259,6 +259,11 @@ test('a map that is not the map of a table seen from above is never kept (the pl
   assert.equal(validMap([1e5, 0, 300, 0, 1e5, 200, 0, 0, 1], 640, 360), false, '100 000 px per mm');
   assert.equal(validMap([NaN, 0, 0, 0, 1, 0, 0, 0, 1], 640, 360), false);
   assert.equal(validMap(null, 640, 360), false);
+  // the 17th report: maps of 0.07 to 0.17 px/mm held for seconds, all the places on one blob; a map is at least 0.25 px/mm for a picture 640 long
+  assert.equal(validMap([0.07, 0, 300, 0, 0.07, 200, 0, 0, 1], 640, 360), false, 'the robot would be 4 px across');
+  assert.equal(validMap([0.3, 0, 300, 0, 0.3, 200, 0, 0, 1], 640, 360), true);
+  assert.equal(validMap([0.2, 0, 200, 0, 0.2, 100, 0, 0, 1], 480, 270), true, '0.2 px/mm in a picture 480 long is 0.27 in one 640 long');
+  assert.equal(validMap([0.15, 0, 200, 0, 0.15, 100, 0, 0, 1], 480, 270), false);
   // a tracker that is handed such a map does not loop on it and does not keep it
   const scene = makeScene({ path: swayPath() }), { tr } = run(makeScene({ path: swayPath() }), { frames: 40 });
   tr.H = [1e4, 0, 300, 0, 1e4, 200, 0.5, 0.5, 1];

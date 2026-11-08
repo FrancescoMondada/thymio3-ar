@@ -7,7 +7,7 @@
 // together. It does not know how much light an LED gives out sideways (it draws every LED as bright from
 // every side): that is what the test on a real robot is for.
 //
-// `?demo&elev=30` holds the view at 30° instead of swinging. `&dist=700` puts the camera 700 mm away instead of 380 (the phone of the 8th report: 0.65 px/mm in a picture 640 px long), `&rowgain=0.5` makes the green LEDs half as bright, `&rowmm=8` moves the LEDs of the row 8 mm along it (half a gap of a group). The page tells it which LEDs the robot is asked to light
+// `?demo&elev=30` holds the view at 30° instead of swinging. `&jump=5,1.8` changes the distance by that factor every 5 s, `&dist=700` puts the camera 700 mm away instead of 380 (the phone of the 8th report: 0.65 px/mm in a picture 640 px long), `&rowgain=0.5` makes the green LEDs half as bright, `&rowmm=8` moves the LEDs of the row 8 mm along it (half a gap of a group). The page tells it which LEDs the robot is asked to light
 // (the 16 green Lego LEDs, 4 aligned ones, the amber arcs of the ring, or the row and the ring in turn). `&blink` makes the 16 LEDs blink as the robot's script
 // does; `&extra` adds steady lights of other colours (a blue one, a red glow, a ring of amber ones), as on the real
 // robot; `&shake=2` moves the whole picture by up to 2 px at each frame, like a hand that trembles; `&sway=40` swings it 40 px
@@ -63,7 +63,7 @@ function roundedRect(w, h, r, cx = 0, cy = 0, perCorner = 8) {
 
 const circle = (r, cx, cy, n = 40) => Array.from({ length: n }, (_, i) => [cx + r * Math.cos((2 * Math.PI * i) / n), cy + r * Math.sin((2 * Math.PI * i) / n), 0]);
 
-export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12, dist = 380, rowGain = 1, rowShift = 0 } = {}) {
+export async function startDemo({ elev = null, blink = false, extra = false, shake = 0, sway = 0, halfMs = () => HALF_MS, group = () => -1, ringSet = () => -1, ringGain = 1, dimArc = -1, dimGain = 0.12, dist = 380, rowGain = 1, rowShift = 0, jumpEvery = 0, jumpFactor = 1 } = {}) {
   const canvas = document.createElement('canvas');
   canvas.width = DEMO_W;
   canvas.height = DEMO_H;
@@ -98,7 +98,9 @@ export async function startDemo({ elev = null, blink = false, extra = false, sha
     const t = (performance.now() - t0) / 1000;
     view.elev = elev != null ? elev : 55 + 35 * Math.sin((2 * Math.PI * t) / 40);       // 20 .. 90°
     const azim = 90 + 70 * Math.sin((2 * Math.PI * t) / 53);                             // from the nose side, and round towards both sides
-    const cam = cameraAt(Math.min(view.elev, 89.9), azim, dist);
+    // `&jump=5,1.8`: every 5 s the camera goes 1.8 times farther away (and back), from one picture to the next, the way the zoom of a phone changes its mode (17th report)
+    const far = jumpEvery > 0 && Math.floor(t / jumpEvery) % 2 === 1;
+    const cam = cameraAt(Math.min(view.elev, 89.9), azim, far ? dist * jumpFactor : dist);
 
     g.fillStyle = '#10141c';
     g.fillRect(0, 0, DEMO_W, DEMO_H);

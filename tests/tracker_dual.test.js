@@ -236,3 +236,24 @@ test('the whole picture is searched only for a map that is missing or struggling
   t2.coast = 3;
   assert.equal(t2.wantsFound(out[out.length - 1].t), true);
 });
+
+test('the zoom jumps (the 17th report: the camera changed its mode): a map held at the old scale with half of its places answering is replaced by a start from the picture', () => {
+  // dist 500 -> 900 mm at 5 s: the robot looks 1.8 times smaller from one picture to the next; before, the map stayed at 0.6 to 0.9 of the right scale for as long as the robot was in view
+  for (const [d0, d1] of [[500, 900], [500, 700], [300, 900], [800, 450]]) {
+    const base = path({ dist: 1 });
+    const scene = makeDualScene({ path: (t) => ({ ...base(t), dist: t >= T0 + 5000 ? d1 : d0 }), shift: swayShift(30) });
+    const { out, tr } = run(scene, { frames: 14 * 16, fps: 14 });
+    const after = out.filter((o) => o.t >= T0 + 6500);
+    const good = after.filter((o) => o.tracking && o.err < 8).length / after.length;
+    assert.ok(good >= 0.9, `${d0} -> ${d1} mm: ${pct(good)} of the pictures 1.5 s after the jump have the 16 places within 8 px`);
+    if (d1 / d0 > 1.5) assert.ok(tr.nReacq >= 1, `${d0} -> ${d1}: the start from the picture took over`);
+  }
+});
+
+test('a healthy map is not replaced: no start from the picture while the places answer (far, dim LEDs, a swaying hand)', () => {
+  for (const opts of [{ dist: 480 }, { dist: 700, rowGains: [1, 0.25, 1, 0.25] }, { dist: 650 }]) {
+    const { out, tr } = run(makeDualScene({ path: path({ dist: opts.dist }), shift: swayShift(50), rowGains: opts.rowGains }), { frames: 14 * 25 });
+    assert.equal(tr.nReacq || 0, 0, `${JSON.stringify(opts)}: replaced ${tr.nReacq} times`);
+    assert.equal(acquisitions(out), 1);
+  }
+});
