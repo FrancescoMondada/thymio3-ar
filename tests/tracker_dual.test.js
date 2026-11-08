@@ -114,6 +114,20 @@ test('a square whose row is nowhere near any of the predicted rows is refused: a
   assert.equal(none.tracking, false, 'no row seen: nothing to say which flash, which turn');
 });
 
+test('a refused start says why: no square, no row, a row that does not fit', () => {
+  const scene = makeDualScene({ path: path() }), f = scene.frame(T0), found = scene.found(T0), mk = () => new Tracker();
+  const go = (tr, fd) => tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: fd, motion: 0, t: T0 });
+  assert.equal(go(mk(), { rings: [], row: found.row }).acqFail.reason, 'sans carré');
+  assert.equal(go(mk(), { rings: found.rings, row: [found.row[0]] }).acqFail.reason, 'sans rangée');
+  const far = found.row.map((p) => ({ ...p, x: p.x + 90, y: p.y - 70 }));
+  const bad = go(mk(), { rings: found.rings, row: far }).acqFail;
+  assert.equal(bad.reason, 'rangée incompatible');
+  assert.ok(bad.err > 0.35);
+  const empty = go(mk(), { rings: found.rings, row: found.row });          // (a good start: no reason)
+  assert.equal(empty.acqFail, null);
+  assert.equal(empty.tracking, true);
+});
+
 test('the whole picture is searched only for a map that is missing or struggling', () => {
   const scene = makeDualScene({ path: path(), shift: swayShift(40) }), tr = new Tracker();
   assert.equal(tr.wantsFound(T0), true);

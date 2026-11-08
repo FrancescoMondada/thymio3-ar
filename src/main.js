@@ -15,6 +15,7 @@ import { locate } from './locate.js';
 import { Timeline } from './timeline.js';
 import { nextSize } from './autosize.js';
 import { Tracker, FLOOR } from './tracker.js';
+import { RangeGuide, RANGE, normalise } from './range.js';
 import { ROW_GAP } from './layout.js';
 import { HALF_MS, HALF_CHOICES, GROUPS, CIRCLES, hzOf, windowOf, countOf, buildScript, isDual } from './script.js';
 import ledsLegoScript from './py/leds_lego.py?raw';
@@ -27,8 +28,10 @@ const canvas = $('view');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 const finder = new SpotFinder();
 const pdiff = new PairDiff({ halfMs: HALF_MS });                   // the default way: the difference of two pictures half a period apart (holds up when the phone moves)
-const tracker = new Tracker();                                       // the map of the robot's plane to the picture, tracked (tracker.js)
-const trackLog = { acquisitions: 0, losses: 0, refreshes: 0, lostBy: {}, state: 'idle', rotation: null, recent: [] };       // recent: what the last pictures did (for the console: window.thymioAR)
+const tracker = new Tracker();
+const rangeGuide = new RangeGuide();                                  // too far / too near the robot: the user is told (range.js)
+let rangeShown = '';                                       // the map of the robot's plane to the picture, tracked (tracker.js)
+const trackLog = { acquisitions: 0, losses: 0, refreshes: 0, lostBy: {}, acqFails: {}, lossScales: [], state: 'idle', rotation: null, recent: [] };       // recent: what the last pictures did (for the console: window.thymioAR)
 window.thymioAR = { tracker, trackLog, get state() { return state; } };
 const SEEN_PEAK = 25;                                                 // a response (0..255) under this in both sets: nothing blinks in the picture (the phone points away from the robot)
 const timeline = new Timeline();                                     // what happened over the whole test, in slices of 10 s (for the report)
@@ -207,7 +210,8 @@ function tickBody(cam, now, meta) {
           trackLog.maxUpdate = Math.max(trackLog.maxUpdate || 0, tm);
           if (tm > 120) { trackLog.slowUpdates = (trackLog.slowUpdates || 0) + 1; tracker.reset(); }       // a picture the tracker found too slow: the map is dropped, not worked on again
           if (tr.refreshed) trackLog.refreshes++;
-          if (tr.state === 'lost' && trackLog.state !== 'lost' && trackLog.state !== 'idle') { trackLog.losses++; const why = tr.lostBy || 'taille'; trackLog.lostBy[why] = (trackLog.lostBy[why] || 0) + 1; }
+          if (!tr.tracking && tr.acqFail) { trackLog.acqFails[tr.acqFail.reason] = (trackLog.acqFails[tr.acqFail.reason] || 0) + 1; trackLog.lastAcq = tr.acqFail; }
+          if (tr.state === 'lost' && trackLog.state !== 'lost' && trackLog.state !== 'idle') { trackLog.lossScales.push(rangeGuide.last ? Number(rangeGuide.last.s.toFixed(2)) : null); if (trackLog.lossScales.length > 8) trackLog.lossScales.shift(); trackLog.losses++; const why = tr.lostBy || 'taille'; trackLog.lostBy[why] = (trackLog.lostBy[why] || 0) + 1; }
           trackLog.state = tr.state; trackLog.rotation = tr.rotation; trackLog.last = tr;
           trackLog.recent.push(`${tr.state[0]}${tr.pending ? 'p' : ''}${tr.rowConfirmed}${tr.ringConfirmed}${tr.points.filter((o) => o.rejected).length ? 'x' : ''}`);
           if (trackLog.recent.length > 80) trackLog.recent.shift();
@@ -216,6 +220,10 @@ function tickBody(cam, now, meta) {
           if (tr.state === 'lost' && trackLog.prevState !== 'lost') (trackLog.lossLog ||= []).push(trackLog.detail.slice());
           trackLog.prevState = tr.state;
         } else if (state.detect === 'track') { tracker.reset(); trackLog.state = 'idle'; }
+        // too far / too near: the scale of the map (or, with no map, what the detector measured), brought to 640 px; the hint over the picture
+        const sc = tr && tr.tracking ? tr.scale : loc && loc.scales ? (loc.scales.ringMean ?? loc.scales.row) : NaN;
+        const guide = rangeGuide.update(now, normalise(sc, W, H), !!(tr && tr.tracking));
+        if (guide.message !== rangeShown) { rangeShown = guide.message; const el = $('rangeHint'); el.textContent = guide.message; el.style.display = guide.message ? 'block' : 'none'; }
       }
     } else if (blink) {
       if (lock.push(img.data, W, H, meta.captureTime != null ? meta.captureTime : now)) {
@@ -521,6 +529,7 @@ function report() {
     ...(state.detect === 'track' ? [`places, quand leur jeu est allumé (réponse fraîche · images · force moyenne de la plus forte réponse proche · écart moyen des réponses aux places prédites en px) : ${Object.entries(tracker.stats).sort(([a], [b]) => a.localeCompare(b)).map(([id, st]) => `${id} ${st.lit ? Math.round((100 * st.hit) / st.lit) : 0} % · ${st.lit} · ${fmt(st.vall / Math.max(1, st.lit), 0)} · ${st.hit ? `${fmt(st.dx / st.hit, 1)},${fmt(st.dy / st.hit, 1)}` : 'n/d'}`).join(' ; ') || 'n/d'} ; force usuelle (rangée/arcs) ${fmt(tracker.signal.green, 0)}/${fmt(tracker.signal.amber, 0)}, seuil plancher ${FLOOR}`] : []),
     ...(trackLog.errors ? [`ERREURS dans le traitement d'une image : ${trackLog.errors}, la dernière : ${trackLog.lastError}`] : []),
     ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0}, recherche sur toute l'image évitée dans ${fmt((100 * (trackLog.lite || 0)) / Math.max(1, trackLog.pictures || 0), 0)} % des images ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
+    ...(state.detect === 'track' ? [`distance (échelle de la carte ramenée à 640 px de côté long ; trop loin sous ${RANGE.far}, trop près au-dessus de ${RANGE.near} px/mm) : trop loin ${fmt(100 * rangeGuide.summary().far, 0)} %, bon ${fmt(100 * rangeGuide.summary().ok, 0)} %, trop près ${fmt(100 * rangeGuide.summary().near, 0)} % des images avec carte ; échelle avant les dernières pertes : ${trackLog.lossScales.map((v) => v ?? '?').join(' ') || 'aucune'} ; départs refusés : ${Object.entries(trackLog.acqFails).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucun'}${trackLog.lastAcq && trackLog.lastAcq.err != null ? ` (dernier : écart de la rangée ${fmt(trackLog.lastAcq.err, 2)} pas, marge ${Number.isFinite(trackLog.lastAcq.margin) ? fmt(trackLog.lastAcq.margin, 2) : 'n/d'})` : ''}`] : []),
     ...(state.detect === 'track' ? [`dernières images du suivi (état a/t/c/l = acquis/suivi/inertie/perdu, p = attend la rangée, puis rangée et arcs confirmés, x = réponse écartée): ${trackLog.recent.slice(-40).join(' ')}`] : []),
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,
     `diagnostic rangée: ${lineOn() && win.diag?.rowCand.count ? `trouvée dans ${fmt(100 * win.diag.rowOk.mean, 0)} % des images, ${fmt(win.diag.rowCand.mean, 1)} candidats, réponse max ${fmt(win.diag.rowPeak.mean, 0)}` : 'n/d'}`,
@@ -571,6 +580,7 @@ async function start(kind) {
       : await startCamera({ facing: state.facing });
     state.cam = cam;
     timeline.reset();
+    rangeGuide.reset();
     resetWindows();
     resetAngles();
     $('splash').style.display = 'none';

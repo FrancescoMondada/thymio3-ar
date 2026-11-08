@@ -426,7 +426,7 @@ export class Tracker {
     const ok = (o) => o.matched && o.inlier !== false;
     return {
       state, tracking: !!this.H && state !== 'lost', H: this.H, mirror: this.mirror, rotation: this.rotation, rms, speed: Math.hypot(this.v.x, this.v.y), invalid: this.nInvalid || 0, pending: !!this.pending, refreshed: !!this.refreshed, lostBy: state === 'lost' ? this.lostBy || null : null,
-      phase: this.dual ? (this.phase ?? 0) : null, dual: !!this.dual,
+      phase: this.dual ? (this.phase ?? 0) : null, dual: !!this.dual, acqFail: this.H ? null : this.acqFail || null,
       scale: this.H ? scaleAt(this.H, 0, 26) : NaN, points: obs,
       expected: scope.length, matched: scope.filter(ok).length, rowMatched: row.filter(ok).length, ringMatched: ringPts.filter(ok).length,
       confirmed: scope.filter((o) => o.confirmed).length, rowConfirmed: row.filter((o) => o.confirmed).length, ringConfirmed: ringPts.filter((o) => o.confirmed).length,
@@ -439,9 +439,14 @@ export class Tracker {
   // quarter turn, and the layout of the row; each of these hypotheses predicts where the row falls, and the spots say which is right: the mean distance of the spots
   // to the nearest predicted LED, in units of the gap between LEDs (0 is perfect), must be small, and the best (set, quarter turn) clearly better than the next.
   acquireDual(found, { maps, w, h }) {
+    // why a start is refused is kept (acqFail: { reason, err, margin }) and counted by the page: 'sans carré' (no square of arcs among the spots), 'sans rangée' (no 3 aligned
+    // spots), 'coins non frais' (the arcs do not answer in the map P at the corners found), 'rangée incompatible' (the best hypothesis puts the row more than 0.35 gap from the
+    // spots seen: err), 'ambigu' (the next hypothesis is nearly as good: margin), 'carte invalide'
+    this.acqFail = null;
     const squares = ((found && (found.rings || (found.ring ? [found.ring] : []))) || []).filter((q) => q && q.length === 4);
     const spots = found && found.row && found.row.length >= 3 ? found.row : null;
-    if (!squares.length || !spots) return false;
+    if (!squares.length) { this.acqFail = { reason: 'sans carré' }; return false; }
+    if (!spots) { this.acqFail = { reason: 'sans rangée' }; return false; }
     const P = maps.amber[0], tau = Math.max(FLOOR, 0.3 * this.signal.amber), hyps = [];
     for (const square of squares) {
       const fresh = square.filter((c) => peakNear(P, w, h, c.x, c.y, 3) >= tau).length;
@@ -462,13 +467,15 @@ export class Tracker {
         }
       }
     }
-    if (!hyps.length) return false;
+    if (!hyps.length) { this.acqFail = { reason: 'coins non frais' }; return false; }
     // the best hypothesis of each (set, quarter turn, square): the layout of the row may be either, the others differ by much more
     const byKey = new Map();
     for (const hp of hyps) { const k = `${squares.indexOf(hp.square)}/${hp.par}/${hp.rot}`; if (!byKey.has(k) || hp.err < byKey.get(k).err) byKey.set(k, hp); }
     const ranked = [...byKey.values()].sort((a, b) => a.err - b.err);
     const best = ranked[0];
-    if (best.err > 0.35 || (ranked.length > 1 && ranked[1].err - best.err < 0.15)) return false;
+    const margin = ranked.length > 1 ? ranked[1].err - best.err : Infinity;
+    if (best.err > 0.35) { this.acqFail = { reason: 'rangée incompatible', err: best.err, margin }; return false; }
+    if (margin < 0.15) { this.acqFail = { reason: 'ambigu', err: best.err, margin }; return false; }
     // all the 8 points at once: the corners and each spot with its nearest predicted LED
     const src = [], dst = [];
     best.square.forEach((c, j) => { const ids = ringIds(best.par), [X, Y] = ring(ids[(j + best.rot) % 4]); src.push({ x: X, y: Y }); dst.push({ x: c.x, y: c.y }); });
@@ -477,7 +484,7 @@ export class Tracker {
       if (bd < 0.5 * ROW_GAP * scaleAt(best.H, 0, best.rowPl[0].Y)) { src.push({ x: best.rowPl[bi].X, y: best.rowPl[bi].Y }); dst.push({ x: sp.x, y: sp.y }); }
     }
     const H = (src.length > 4 && fitHomography(src, dst)) || best.H;
-    if (!validMap(H, w, h)) return false;
+    if (!validMap(H, w, h)) { this.acqFail = { reason: 'carte invalide' }; return false; }
     const vals = best.square.map((c) => peakNear(P, w, h, c.x, c.y, 3)).sort((a, b) => a - b);
     this.signal.amber = Math.max(FLOOR, (vals[1] + vals[2]) / 2); this.known.amber = true;
     this.H = H; this.mirror = best.mirror; this.rotation = best.rot; this.phase = best.par; this.coast = 0; this.seen = {};

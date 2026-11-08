@@ -25,6 +25,7 @@
       }
       #stage { position: relative; background: #000; display: grid; place-items: center; overflow: hidden; }
       #view { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; display: block; }
+      #rangeHint { display: none; position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); max-width: 92%; padding: 8px 14px; border-radius: 10px; background: rgba(255, 159, 67, 0.95); color: #1a1205; font-weight: 600; text-align: center; pointer-events: none; }
       #splash { position: absolute; inset: 0; display: grid; place-content: center; gap: 14px; padding: 24px; text-align: center; background: rgba(11, 16, 32, 0.92); }
       #splash h1 { margin: 0; font-size: 22px; }
       #splash p { margin: 0 auto; max-width: 34em; color: var(--dim); }
@@ -58,6 +59,7 @@
     <div id="app">
       <div id="stage">
         <canvas id="view" width="640" height="360"></canvas>
+        <div id="rangeHint" role="status"></div>
         <div id="splash">
           <h1>Test : retrouver les LED du Thymio avec la caméra</h1>
           <p class="note" id="buildNote" style="margin:0 0 6px"></p>
