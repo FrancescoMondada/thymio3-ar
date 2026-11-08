@@ -192,7 +192,7 @@ function tickBody(cam, now, meta) {
         // each set says where the other must be (layout.js), at the scale measured in this picture; where it must be, a missing set is
         // looked for again with a lower threshold
         loc = lite ? { aligned: null, square: null, window: null, predicted: null, rescued: false, scales: null, mismatch: false } : locate({
-          line: spots.filter((sp) => sp.set === 'line'), ring: spots.filter((sp) => sp.set === 'ring'), group: dualOn ? 0 : state.group, wantLine: lineOn(), wantRing: squareOn(), gate: !dualOn,
+          line: spots.filter((sp) => sp.set === 'line'), ring: spots.filter((sp) => sp.set === 'ring'), group: dualOn ? 0 : state.group, wantLine: lineOn(), wantRing: squareOn(), gate: !dualOn, rowOpts: dualOn ? { all: true } : {}, ringOpts: dualOn ? { all: true, maxCandidates: 20 } : {},
           elevDeg: currentAngle(), longSide,
           retryRing: squareOn() ? (w) => tag(pdiffAmber.find(Math.max(25, Math.round(state.ringThreshold * 0.45)), arcSize, w).spots, 'ring') : null,
           retryLine: lineOn() ? (w) => tag(pdiff.find(Math.max(20, Math.round(state.blinkThreshold * 0.6)), size, w).spots, 'line') : null,
@@ -203,7 +203,8 @@ function tickBody(cam, now, meta) {
           const ta = performance.now();
           tr = tracker.update({
             maps: { green: [pdiff.P, pdiff.N], amber: [pdiffAmber.P, pdiffAmber.N] }, w: W, h: H, group: state.group, circle: state.circle, motion: Number.isFinite(currentMotion()) ? currentMotion() : 0, t,
-            found: { rings: ringsFor(loc.square), row: loc.aligned && loc.aligned.chosen.length >= 3 ? loc.aligned.chosen : null },
+            // the dual flash: the best few squares of arcs and rows, tried against each other (a distractor in the background, a light in line with the row, can be the first)
+            found: { rings: dualOn && loc.square && loc.square.candidates && loc.square.candidates.length ? loc.square.candidates : ringsFor(loc.square), row: loc.aligned && loc.aligned.chosen.length >= 3 ? loc.aligned.chosen : null, rows: dualOn && loc.aligned && loc.aligned.candidates ? loc.aligned.candidates : null },
           });
           if (tr.state === 'acquire') trackLog.acquisitions++;
           const tm = performance.now() - ta;
@@ -220,6 +221,9 @@ function tickBody(cam, now, meta) {
           if (tr.state === 'lost' && trackLog.prevState !== 'lost') (trackLog.lossLog ||= []).push(trackLog.detail.slice());
           trackLog.prevState = tr.state;
         } else if (state.detect === 'track') { tracker.reset(); trackLog.state = 'idle'; }
+        if (trackLog.t0 == null) trackLog.t0 = now;
+        if (trackLog.firstSeenT == null && Math.max(peakLine, peakRing) >= SEEN_PEAK) trackLog.firstSeenT = now;
+        if (trackLog.firstMapT == null && tr && tr.tracking) trackLog.firstMapT = now;
         // too far / too near: the scale of the map (or, with no map, what the detector measured), brought to 640 px; the hint over the picture
         const sc = tr && tr.tracking ? tr.scale : loc && loc.scales ? (loc.scales.ringMean ?? loc.scales.row) : NaN;
         const guide = rangeGuide.update(now, normalise(sc, W, H), !!(tr && tr.tracking));
@@ -529,6 +533,7 @@ function report() {
     ...(state.detect === 'track' ? [`places, quand leur jeu est allumé (réponse fraîche · images · force moyenne de la plus forte réponse proche · écart moyen des réponses aux places prédites en px) : ${Object.entries(tracker.stats).sort(([a], [b]) => a.localeCompare(b)).map(([id, st]) => `${id} ${st.lit ? Math.round((100 * st.hit) / st.lit) : 0} % · ${st.lit} · ${fmt(st.vall / Math.max(1, st.lit), 0)} · ${st.hit ? `${fmt(st.dx / st.hit, 1)},${fmt(st.dy / st.hit, 1)}` : 'n/d'}`).join(' ; ') || 'n/d'} ; force usuelle (rangée/arcs) ${fmt(tracker.signal.green, 0)}/${fmt(tracker.signal.amber, 0)}, seuil plancher ${FLOOR}`] : []),
     ...(trackLog.errors ? [`ERREURS dans le traitement d'une image : ${trackLog.errors}, la dernière : ${trackLog.lastError}`] : []),
     ...(state.detect === 'track' ? [`charge : image traitée en moyenne ${fmt((trackLog.sumTick || 0) / Math.max(1, trackLog.nTick || 0), 0)} ms (max ${fmt(trackLog.maxTick || 0, 0)}), images de plus de 200 ms : ${trackLog.slowTicks || 0}, recherche sur toute l'image évitée dans ${fmt((100 * (trackLog.lite || 0)) / Math.max(1, trackLog.pictures || 0), 0)} % des images ; suivi seul : max ${fmt(trackLog.maxUpdate || 0, 1)} ms, remises à zéro pour lenteur : ${trackLog.slowUpdates || 0}, cartes absurdes écartées : ${win.last.tracker?.invalid ?? 0}`] : []),
+    ...(state.detect === 'track' ? [`départ : premier clignotement vu ${trackLog.firstSeenT != null ? `après ${fmt((trackLog.firstSeenT - trackLog.t0) / 1000, 1)} s` : 'jamais'}, première carte ${trackLog.firstMapT != null ? `après ${fmt((trackLog.firstMapT - trackLog.t0) / 1000, 1)} s` : 'jamais'}${trackLog.firstSeenT != null && trackLog.firstMapT != null ? ` (${fmt((trackLog.firstMapT - trackLog.firstSeenT) / 1000, 1)} s après le premier clignotement)` : ''}, depuis le début de l'analyse`] : []),
     ...(state.detect === 'track' ? [`distance (échelle de la carte ramenée à 640 px de côté long ; trop loin sous ${RANGE.far}, trop près au-dessus de ${RANGE.near} px/mm) : trop loin ${fmt(100 * rangeGuide.summary().far, 0)} %, bon ${fmt(100 * rangeGuide.summary().ok, 0)} %, trop près ${fmt(100 * rangeGuide.summary().near, 0)} % des images avec carte ; échelle avant les dernières pertes : ${trackLog.lossScales.map((v) => v ?? '?').join(' ') || 'aucune'} ; départs refusés : ${Object.entries(trackLog.acqFails).map(([k, v]) => `${k} ${v}`).join(', ') || 'aucun'}${trackLog.lastAcq && trackLog.lastAcq.err != null ? ` (dernier : écart de la rangée ${fmt(trackLog.lastAcq.err, 2)} pas, marge ${Number.isFinite(trackLog.lastAcq.margin) ? fmt(trackLog.lastAcq.margin, 2) : 'n/d'})` : ''}`] : []),
     ...(state.detect === 'track' ? [`dernières images du suivi (état a/t/c/l = acquis/suivi/inertie/perdu, p = attend la rangée, puis rangée et arcs confirmés, x = réponse écartée): ${trackLog.recent.slice(-40).join(' ')}`] : []),
     `réglages modifiés: ${changedSettings().join(', ') || 'aucun (valeurs par défaut)'}`,

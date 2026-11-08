@@ -18,16 +18,31 @@
 const GAP_MARGIN = 1.25;
 
 // -> { chosen: [spot, ...] along the line, full: boolean, rms, angleDeg, gaps } or { chosen: [], full: false }
-export function pickAligned(spots, { n = 4, maxCandidates = 24, lineTol = 0.06, maxRatio = 3, maxStep = 1.8, minGap = 4, allowFewer = true } = {}) {
+// all: also `candidates`, the best `topK` different sets (of 4, or of 3 when there are fewer than 3 of 4), each as an array of spots along its line: the page that
+// starts the map of the dual flash tries them against the square of arcs instead of trusting the first (a light in line with the row is a better "row" than the row)
+export function pickAligned(spots, { n = 4, maxCandidates = 24, lineTol = 0.06, maxRatio = 3, maxStep = 1.8, minGap = 4, allowFewer = true, all = false, topK = 6 } = {}) {
   const cand = spots.slice().sort((a, b) => (b.weight ?? b.area ?? 1) - (a.weight ?? a.area ?? 1)).slice(0, maxCandidates);
+  const found = [];
+  let first = null;
   for (let k = n; k >= (allowFewer ? 3 : n); k--) {
-    const best = bestSet(cand, k, { lineTol, maxRatio, maxStep, minGap });
-    if (best) return { ...best, full: k === n };
+    const best = bestSet(cand, k, { lineTol, maxRatio, maxStep, minGap }, all ? found : null);
+    if (best && !first) first = { ...best, full: k === n };
+    if (first && (!all || found.length >= 3)) break;
   }
-  return { chosen: [], full: false };
+  if (!first) return { chosen: [], full: false, ...(all ? { candidates: [] } : {}) };
+  if (!all) return first;
+  const seen = new Set(), candidates = [];
+  for (const r of found.sort((a, b) => b.score - a.score)) {
+    const key = r.chosen.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).sort().join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push(r.chosen);
+    if (candidates.length >= topK) break;
+  }
+  return { ...first, candidates };
 }
 
-function bestSet(cand, k, opts) {
+function bestSet(cand, k, opts, collect = null) {
   const m = cand.length;
   if (m < k) return null;
   let best = null;
@@ -35,7 +50,7 @@ function bestSet(cand, k, opts) {
   const rec = (start, depth) => {
     if (depth === k) {
       const r = evaluate(idx.map((i) => cand[i]), opts);
-      if (r && (!best || r.score > best.score)) best = r;
+      if (r) { if (collect) collect.push(r); if (!best || r.score > best.score) best = r; }
       return;
     }
     for (let i = start; i <= m - (k - depth); i++) { idx[depth] = i; rec(i + 1, depth + 1); }

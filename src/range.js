@@ -1,12 +1,9 @@
-// How far is the phone from the robot? The scale of the map (px per mm, brought to a picture 640 px long so that the analysis size does not matter) says it:
-// 0.6 px/mm is about 75 cm, 2.2 about 21 cm (a camera of about 70 degrees across its long side). In the 14th test the map held at 0.5 to 2.4 px/mm in most
-// of the run and was lost for several seconds when the robot was very far (0.44, 0.56 px/mm) or when the phone came very near: there the page cannot do much, the
-// user can, and says so.
-export const RANGE = { far: 0.6, near: 2.2, idealMin: 0.8, idealMax: 1.5 };
-export const MESSAGES = {
-  far: 'Trop loin : rapprochez le téléphone du robot (idéal : 30 à 60 cm).',
-  near: 'Trop près : éloignez le téléphone du robot (idéal : 30 à 60 cm).',
-};
+// How big does the robot look? The scale of the map (px per mm, brought to a picture 640 px long so that the analysis size does not matter) says it, and it is what
+// the detection depends on (the LEDs of a group are 16 mm apart: at 0.5 px/mm they are 8 px apart and run together). It depends on the optics of the camera as much as
+// on the distance, so the page never says how far to stand: only "too far" or "too near". In the 14th test the map held at 0.5 to 2.4 px/mm in most of the run and was
+// lost for several seconds when the robot looked very small (0.44, 0.56 px/mm).
+export const RANGE = { far: 0.6, near: 2.2 };
+export const MESSAGES = { far: 'Trop loin', near: 'Trop près' };
 
 export const classifyRange = (scale640) => (!Number.isFinite(scale640) ? null : scale640 < RANGE.far ? 'far' : scale640 > RANGE.near ? 'near' : 'ok');
 // px/mm at the size analysed -> px/mm for a picture 640 px long

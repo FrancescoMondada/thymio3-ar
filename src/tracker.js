@@ -444,9 +444,10 @@ export class Tracker {
     // spots seen: err), 'ambigu' (the next hypothesis is nearly as good: margin), 'carte invalide'
     this.acqFail = null;
     const squares = ((found && (found.rings || (found.ring ? [found.ring] : []))) || []).filter((q) => q && q.length === 4);
-    const spots = found && found.row && found.row.length >= 3 ? found.row : null;
+    // found.rows: several candidate rows (the page gives the best few: a light in line with the row, or a distractor in the background, can be the first); found.row: one
+    const rowSets = ((found && (found.rows && found.rows.length ? found.rows : found.row ? [found.row] : [])) || []).filter((r) => r && r.length >= 3);
     if (!squares.length) { this.acqFail = { reason: 'sans carré' }; return false; }
-    if (!spots) { this.acqFail = { reason: 'sans rangée' }; return false; }
+    if (!rowSets.length) { this.acqFail = { reason: 'sans rangée' }; return false; }
     const P = maps.amber[0], tau = Math.max(FLOOR, 0.3 * this.signal.amber), hyps = [];
     for (const square of squares) {
       const fresh = square.filter((c) => peakNear(P, w, h, c.x, c.y, 3) >= tau).length;
@@ -457,12 +458,15 @@ export class Tracker {
         for (let rot = 0; rot < 4; rot++) {
           const H = fitHomography(ids.map((_, j) => { const [X, Y] = ring(ids[(j + rot) % 4]); return { x: X, y: Y }; }), corners);
           if (!H || !validMap(H, w, h)) continue;
-          for (const mirror of this.mirror ? [this.mirror] : [1, -1]) {
+          for (const mirror of this.mirror ? [this.mirror] : [1, -1]) for (const spots of rowSets) {
             const rowPl = expectedPoints({ group: 4, circle: 2, mirror }).filter((p) => p.set === 'row' && p.phase === par);
             const pred = rowPl.map((p) => applyH(H, p.X, p.Y)), gap = ROW_GAP * scaleAt(H, 0, rowPl[0].Y);
             if (!(gap > 0)) continue;
-            const err = spots.reduce((a, sp) => a + Math.min(...pred.map((q) => Math.hypot(q.x - sp.x, q.y - sp.y))), 0) / spots.length / gap;
-            hyps.push({ H, par, rot, mirror, err, square, rowPl, pred });
+            // how well the spots fall on the predicted LEDs: the mean distance of the 3 BEST spots, in gaps. Not of all of them: a light in line with the row (out of a hole in
+            // the side of the body, 1.5 gaps beyond its end) is a 4th "aligned" spot that fits no hypothesis, and the 14th report refused 300 starts for it (0.58 gap)
+            const errs = spots.map((sp) => Math.min(...pred.map((q) => Math.hypot(q.x - sp.x, q.y - sp.y))) / gap).sort((a, b) => a - b), k = Math.min(3, errs.length);
+            const err = errs.slice(0, k).reduce((a, b) => a + b, 0) / k;
+            hyps.push({ H, par, rot, mirror, err, square, rowPl, pred, spots });
           }
         }
       }
@@ -479,7 +483,7 @@ export class Tracker {
     // all the 8 points at once: the corners and each spot with its nearest predicted LED
     const src = [], dst = [];
     best.square.forEach((c, j) => { const ids = ringIds(best.par), [X, Y] = ring(ids[(j + best.rot) % 4]); src.push({ x: X, y: Y }); dst.push({ x: c.x, y: c.y }); });
-    for (const sp of spots) {
+    for (const sp of best.spots) {
       let bi = 0, bd = Infinity; best.pred.forEach((q, i) => { const d = Math.hypot(q.x - sp.x, q.y - sp.y); if (d < bd) { bd = d; bi = i; } });
       if (bd < 0.5 * ROW_GAP * scaleAt(best.H, 0, best.rowPl[0].Y)) { src.push({ x: best.rowPl[bi].X, y: best.rowPl[bi].Y }); dst.push({ x: sp.x, y: sp.y }); }
     }

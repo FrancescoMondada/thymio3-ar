@@ -56,7 +56,8 @@ export function makeDualScene({ w = 640, path, mirror = 1, rowOffset = 0, rowZ =
   }
   // what locate.js would give for the flash that is lit: the corners of the square of arcs, ordered around on the screen (starting at corner `rot`), and the spots of the row
   // along its line, all of them fresh (the same flash). `replace`: [{ index, x, y }] a corner of the square taken from somewhere else (a hole)
-  function found(t, { rot = 0, noise = 0.4, replace = [] } = {}) {
+  // rowExtra: [gaps]: spots on the line of the row, that many gaps beyond its last LED (a light from a hole in line with the row); rowDrop: [j]: LEDs of the row not found
+  function found(t, { rot = 0, noise = 0.4, replace = [], rowExtra = [], rowDrop = [] } = {}) {
     const ph = phaseAt(t), jig = (q) => ({ x: q.x + (rnd() - 0.5) * 2 * noise, y: q.y + (rnd() - 0.5) * 2 * noise, weight: 100, area: 40 });
     const arcs = places.filter((p) => p.set === 'ring' && p.phase === ph).map((p) => placePx(t, p)), rowP = places.filter((p) => p.set === 'row' && p.phase === ph).map((p) => placePx(t, p));
     const cx = arcs.reduce((a, q) => a + q.x, 0) / 4, cy = arcs.reduce((a, q) => a + q.y, 0) / 4;
@@ -64,7 +65,9 @@ export function makeDualScene({ w = 640, path, mirror = 1, rowOffset = 0, rowZ =
     corners = corners.map((c, i) => { const r = replace.find((q) => q.index === i); return r ? { ...c, x: r.x, y: r.y } : c; });
     const rotated = corners.map((_, i) => corners[(i + rot) % 4]);
     const u = { x: rowP[3].x - rowP[0].x, y: rowP[3].y - rowP[0].y };
-    const row = rowP.map(jig).sort((a, b) => a.x * u.x + a.y * u.y - (b.x * u.x + b.y * u.y));
+    const len = Math.hypot(u.x, u.y), gapPx = len / 3, dir = { x: u.x / len, y: u.y / len };
+    const extra = rowExtra.map((g) => ({ x: rowP[3].x + dir.x * g * gapPx + (rnd() - 0.5) * noise, y: rowP[3].y + dir.y * g * gapPx + (rnd() - 0.5) * noise, weight: 100, area: 40 }));
+    const row = [...rowP.filter((_, j) => !rowDrop.includes(j)).map(jig), ...extra].sort((a, b) => a.x * u.x + a.y * u.y - (b.x * u.x + b.y * u.y));
     return { rings: [rotated], row };
   }
   return { w, h, frame, found, phaseAt, placePx, places, holes, holePx: (t, hole) => toPx(t, hole.X, hole.Y, hole.Z), HALF_MS };

@@ -16,7 +16,9 @@ test('too far under 0.6 px/mm, too near over 2.2, in range between (the 14th tes
   assert.equal(classifyRange(2.2), 'ok');
   assert.equal(classifyRange(2.5), 'near');
   assert.equal(classifyRange(NaN), null);
-  assert.ok(RANGE.idealMin > RANGE.far && RANGE.idealMax < RANGE.near);
+  assert.ok(RANGE.far < RANGE.near);
+  assert.deepEqual(Object.values(MESSAGES), ['Trop loin', 'Trop près'], 'just that: no distance, it depends on the optics');
+  for (const m of Object.values(MESSAGES)) assert.ok(!/\d|cm|mètre/i.test(m), m);
 });
 
 test('the hint comes after 1.2 s out of range and goes after 0.8 s back in it: a moment out of range says nothing', () => {

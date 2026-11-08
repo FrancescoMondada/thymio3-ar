@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { Tracker, expectedPoints } from '../src/tracker.js';
 import { applyH } from '../src/homography.js';
 import { makeDualScene } from './dual_scene.js';
+import { pickAligned } from '../src/aligned.js';
+import { pickSquare } from '../src/square.js';
 
 // The dual flash (leds_lego.py GROUP 4, CIRCLE 2): each flash has a row AND a ring set, so each flash alone gives the whole map.
 const T0 = 1000;
@@ -112,6 +114,51 @@ test('a square whose row is nowhere near any of the predicted rows is refused: a
   assert.equal(r.tracking, false);
   const none = tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: { rings: found.rings, row: null }, motion: 0, t: T0 + 40 });
   assert.equal(none.tracking, false, 'no row seen: nothing to say which flash, which turn');
+});
+
+test('lights in line with the row (a light out of a hole, beyond its end) do not spoil a start: the row is judged on its 3 best spots, and the map is made from the spots that fit', () => {
+  const path0 = path();
+  for (const extra of [[1], [1.5], [2], [3], [1, 2.2]]) for (let i = 0; i < 12; i++) {
+    const t = T0 + i * 173, scene = makeDualScene({ path: path0, seed: i + 1 }), tr = new Tracker(), f = scene.frame(t);
+    const r = tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: scene.found(t, { noise: 0.6, rowExtra: extra }), motion: 0, t });
+    assert.equal(r.tracking, true, `strays at ${extra} gaps, try ${i}: ${r.acqFail && r.acqFail.reason}`);
+    assert.ok(placeError(r, tr, f) < 4, `the 16 places within ${placeError(r, tr, f).toFixed(1)} px (the stray was not used)`);
+  }
+  // one LED missing and a stray: still three good spots
+  const t = T0 + 40, scene = makeDualScene({ path: path0 }), tr = new Tracker(), f = scene.frame(t);
+  assert.equal(tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: scene.found(t, { rowDrop: [0], rowExtra: [2] }), motion: 0, t }).tracking, true);
+});
+
+test('a distractor in the background (a strong light that blinks, the user\'s 15th report): the best square and the best row are not the right ones, the candidates are tried against each other and the map starts', () => {
+  let startedFirst = 0, startedAll = 0, tries = 0;
+  for (let i = 0; i < 30; i++) {
+    const t = T0 + i * 211, scene = makeDualScene({ path: path(), seed: i + 1 }), f = scene.frame(t), truth = scene.found(t, { noise: 0.6 });
+    // the spots a detector finds: the 4 arcs and the 4 LEDs, and strong lights near them, in amber and in green (very bright: they win the choices by weight)
+    const cx = truth.rings[0].reduce((a, c) => a + c.x, 0) / 4, cy = truth.rings[0].reduce((a, c) => a + c.y, 0) / 4;
+    const ringSpots = [...truth.rings[0].map((c) => ({ ...c, weight: 100 })), { x: cx + 40, y: cy - 30, weight: 900, area: 40 }, { x: cx - 45, y: cy + 38, weight: 800, area: 40 }];
+    const u = { x: truth.row[3].x - truth.row[0].x, y: truth.row[3].y - truth.row[0].y }, len = Math.hypot(u.x, u.y);
+    const rowSpots = [...truth.row.map((c) => ({ ...c, weight: 100 })), { x: truth.row[3].x + (u.x / len) * len * 0.55, y: truth.row[3].y + (u.y / len) * len * 0.55, weight: 900, area: 40 }, { x: truth.row[0].x - (u.x / len) * len * 0.5, y: truth.row[0].y - (u.y / len) * len * 0.5, weight: 800, area: 40 }];
+    const one = (found) => { const tr = new Tracker(); return tr.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found, motion: 0, t }); };
+    const sq1 = pickSquare(ringSpots, { minSide: 8 }), row1 = pickAligned(rowSpots, { minGap: 5 });
+    const sqA = pickSquare(ringSpots, { minSide: 8, all: true }), rowA = pickAligned(rowSpots, { minGap: 5, all: true });
+    tries++;
+    if (one({ rings: sq1.full ? [sq1.chosen] : [], row: row1.chosen }).tracking) startedFirst++;
+    const r = one({ rings: sqA.candidates, rows: rowA.candidates });
+    if (r.tracking) { startedAll++; const tr2 = new Tracker(); const rr = tr2.update({ maps: f.maps, w: f.w, h: f.h, group: GROUP, circle: CIRCLE, found: { rings: sqA.candidates, rows: rowA.candidates }, motion: 0, t }); assert.ok(placeError(rr, tr2, f) < 4, `try ${i}: the 16 places within ${placeError(rr, tr2, f).toFixed(1)} px`); }
+  }
+  assert.ok(startedAll >= 27, `with the candidates: ${startedAll} of ${tries} started`);
+  assert.ok(startedAll > startedFirst, `the first choices alone: ${startedFirst}; with the candidates: ${startedAll}`);
+});
+
+test('pickAligned and pickSquare give their best few different candidates on request, the best first, and the same result as before otherwise', () => {
+  const row = [0, 1, 2, 3].map((j) => ({ x: 100 + 20 * j, y: 50 + j, weight: 100, area: 20 })), stray = { x: 160, y: 54, weight: 300, area: 20 };
+  const plain = pickAligned([...row, stray], { minGap: 5 }), many = pickAligned([...row, stray], { minGap: 5, all: true });
+  assert.deepEqual(many.chosen, plain.chosen, 'the first is the same');
+  assert.ok(many.candidates.length >= 2 && many.candidates.length <= 6);
+  assert.deepEqual(many.candidates[0], plain.chosen);
+  assert.ok(many.candidates.some((c) => c.length === 4 && row.every((p) => c.includes(p))), 'the true row is among them');
+  assert.equal(pickAligned([], { all: true }).candidates.length, 0);
+  assert.equal(pickAligned([]).candidates, undefined);
 });
 
 test('a refused start says why: no square, no row, a row that does not fit', () => {

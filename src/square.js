@@ -36,15 +36,18 @@ function residual(L, V) {
 
 // -> { chosen: [4 spots in order around the shape], full: true, sides, vanishing: { residual, pair } | null, centre } or
 //    { chosen: [], full: false }
-export function pickSquare(spots, { maxCandidates = 16, minSide = 6, maxOpposite = 2, maxDiagonal = 4.5, maxSideRatio = 5, minArea = 0.08, maxSizeRatio = 4, diagonalBand = 0.3, rowLine = null, preferParallel = false } = {}) {
+// all: also `candidates`, the best `topK` different quadrilaterals (each the 4 corners in order around): see pickAligned
+export function pickSquare(spots, { maxCandidates = 16, minSide = 6, maxOpposite = 2, maxDiagonal = 4.5, maxSideRatio = 5, minArea = 0.08, maxSizeRatio = 4, diagonalBand = 0.3, rowLine = null, preferParallel = false, all = false, topK = 8 } = {}) {
   const cand = spots.slice().sort((a, b) => (b.weight ?? b.area ?? 1) - (a.weight ?? a.area ?? 1)).slice(0, maxCandidates);
   const m = cand.length;
   let best = null;
+  const valid = [];
   for (let i = 0; i < m; i++) for (let j = i + 1; j < m; j++) for (let k = j + 1; k < m; k++) for (let l = k + 1; l < m; l++) {
     const r = evaluate([cand[i], cand[j], cand[k], cand[l]], { minSide, maxOpposite, maxDiagonal, maxSideRatio, minArea, maxSizeRatio, diagonalBand, rowLine, preferParallel });
-    if (r && (!best || r.score > best.score)) best = r;
+    if (r) { if (all) valid.push(r); if (!best || r.score > best.score) best = r; }
   }
-  return best ? { ...best, full: true } : { chosen: [], full: false };
+  if (!best) return { chosen: [], full: false, ...(all ? { candidates: [] } : {}) };
+  return all ? { ...best, full: true, candidates: valid.sort((a, b) => b.score - a.score).slice(0, topK).map((r) => r.chosen) } : { ...best, full: true };
 }
 
 function evaluate(pts, { minSide, maxOpposite, maxDiagonal, maxSideRatio, minArea, maxSizeRatio, diagonalBand, rowLine, preferParallel }) {
