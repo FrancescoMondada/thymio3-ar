@@ -38,3 +38,11 @@ export function figures(rows, events = []) {
     longestNoMapS: Math.round(longest / 100) / 10, jumps, jumpShare: pairs ? Math.round((1000 * jumps) / pairs) / 10 : null, scaleJumps, maxJumpPx: Math.round(maxJump),
   };
 }
+
+// The exposure sweep (main.js) writes an event "exposition : 4.0 ms demandées" at each step; the rows between two such events are one step of the curve "how well is the
+// robot followed at this exposure". The first `settleMs` after a change are left out (the camera needs a moment to settle).
+export function exposureSegments(events, endMs, settleMs = 1000) {
+  const ev = events.filter(([, text]) => /^exposition : /.test(text));
+  return ev.map(([ms, text], i) => ({ label: text.replace(/^exposition : /, ''), from: ms + settleMs, to: i + 1 < ev.length ? ev[i + 1][0] : endMs }));
+}
+export const slice = (rows, from, to) => rows.filter((r) => r[0] >= from && r[0] < to);

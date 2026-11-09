@@ -134,6 +134,33 @@ addEventListener('deviceorientation', (e) => {
   sensor = { beta: e.beta, gamma: e.gamma, seen: true };
 });
 
+// ---- the picture shown to the user -----------------------------------------------------------------------
+// The detection reads the picture as the camera gives it: a SHORT exposure keeps the LEDs coloured (at night, with the exposure the camera chose, 40 ms, the lit LEDs came
+// out near-white and the row was found in 44 % of the pictures; with 4 ms locked, 99 %: the 20th step). But a short exposure at night is a nearly black picture, useless as the
+// background of an AR view. So the user is shown a COPY lightened by a curve (gamma) that follows how dark the picture is; a picture that is bright enough is shown as it is.
+// Only what is displayed changes: the detection has already read the original pixels.
+const lighten = { on: params.get('lighten') !== '0', gamma: 1, lutGamma: 0, lut: new Uint8Array(256), out: null, outW: 0, outH: 0, count: 0, mean: NaN };
+const LIGHTEN_TARGET = 0.3, LIGHTEN_MAX = 3;                            // the mean brightness aimed at (0..1), the strongest curve
+function lightenDisplay(img, W, H) {
+  const d = img.data, n = W * H;
+  let sum = 0, c = 0;
+  for (let i = 0; i < n; i += 13) { const j = i * 4; sum += d[j] * 0.299 + d[j + 1] * 0.587 + d[j + 2] * 0.114; c++; }
+  const mean = Math.max(1, sum / c) / 255;
+  lighten.mean = mean;
+  const want = Math.min(LIGHTEN_MAX, Math.max(1, Math.log(mean) / Math.log(LIGHTEN_TARGET)));
+  lighten.gamma += 0.15 * (want - lighten.gamma);                         // eased: the picture must not pump
+  if (lighten.gamma < 1.05) return;                                       // bright enough
+  if (Math.abs(lighten.gamma - lighten.lutGamma) > 0.02) {
+    for (let v = 0; v < 256; v++) lighten.lut[v] = Math.round(255 * Math.pow(v / 255, 1 / lighten.gamma));
+    lighten.lutGamma = lighten.gamma;
+  }
+  if (!lighten.out || lighten.outW !== W || lighten.outH !== H) { lighten.out = ctx.createImageData(W, H); lighten.outW = W; lighten.outH = H; }
+  const o = lighten.out.data, lut = lighten.lut;
+  for (let j = 0, m = n * 4; j < m; j += 4) { o[j] = lut[d[j]]; o[j + 1] = lut[d[j + 1]]; o[j + 2] = lut[d[j + 2]]; o[j + 3] = 255; }
+  ctx.putImageData(lighten.out, 0, 0);
+  lighten.count++;
+}
+
 // ---- the loop: one pass per camera frame ---------------------------------------------------------------
 function schedule(cam) {
   const v = cam.video;
@@ -321,6 +348,7 @@ function tickBody(cam, now, meta) {
       else { if (lineOn()) pdiff.paintMask(img.data); if (squareOn()) pdiffAmber.paintMask(img.data); }
       ctx.putImageData(img, 0, 0);
     }
+    if (lighten.on && !(state.mask && !res.waiting)) lightenDisplay(img, W, H);        // (after the detection: it read the original pixels)
     // the spots that count: all of them, or the green ones (the 16 Lego LEDs; the ring round the pad and the body
     // LEDs are other colours and also bright); a blinking spot has no colour: they all count
     let counted = blink || state.color === 'all' ? res.spots : res.spots.filter((s) => s.color === state.color);
@@ -597,12 +625,15 @@ function refreshPanel() {
 // ---- the recording of the camera ------------------------------------------------------------------------
 function syncRecording() {
   const recording = recorder.state === 'recording';
-  $('rec').disabled = !recorder.supported || !state.cam || !state.cam.stream;
+  $('rec').disabled = !recorder.supported || !state.cam || !state.cam.stream || !!sweep;
+  $('sweep').disabled = !recorder.supported || !state.cam || !state.cam.track || state.demo || !exposureInfo(state.cam).canLock;
+  $('sweep').textContent = sweep ? `■ Arrêter le balayage (étape ${sweep.i + 1}/${SWEEP.length} : ${SWEEP[sweep.i] == null ? 'exposition de la caméra' : `${SWEEP[sweep.i] / 10} ms`})` : 'Balayage de l\'exposition (30 s, enregistre)';
   $('rec').textContent = recording ? `■ Arrêter l'enregistrement (${(recorder.elapsed() / 1000).toFixed(0)} s)` : '● Enregistrer la vidéo de la caméra';
   $('rec').classList.toggle('on', recording);
   $('recDone').style.display = recFiles && !recording ? '' : 'none';
   $('recNote').textContent = recMsg || (!recorder.supported ? 'Ce navigateur ne sait pas enregistrer la vidéo de la caméra.'
     : !state.cam ? 'Démarrez d\'abord la caméra (et le robot).'
+    : recording && sweep ? 'Balayage en cours : gardez le robot dans l\'image, le plus immobile possible, jusqu\'à la fin (le téléphone change l\'exposition tout seul).'
     : recording ? `Enregistrement en cours (arrêt automatique à ${recorder.maxMs / 1000} s) : filmez le robot comme pour un test.`
     : recFiles ? `Enregistré : ${recorder.line()}. Deux fichiers à partager : la vidéo et le rapport (.txt).` : '');
 }
@@ -629,6 +660,39 @@ function finishRecording() {
   syncRecording();
 }
 
+// The exposure sweep: the exposure time goes through the steps below by itself while the camera is recorded, and each change is a time-stamped event of the trace, so that
+// a single tap in a room gives the curve "how well is the robot followed at each exposure, in THIS light" (the camera's own exposure readback proved stale: what was ASKED
+// is what is logged). The 20th step showed 40 ms at night: row found in 44 % of the pictures; 4 ms: 99 %. Other lights are still unknown.
+const SWEEP = [null, 10, 20, 40, 80, 160, 320];                     // null: the camera's own exposure; else in units of 0.1 ms (1, 2, 4, 8, 16, 32 ms)
+const SWEEP_FIRST_MS = 5000, SWEEP_STEP_MS = 4000;
+let sweep = null;                                                    // { i } while it runs
+async function toggleSweep() {
+  if (sweep) { sweep.stop = true; return; }
+  const cam = state.cam;
+  if (!cam || !cam.track || state.demo || !exposureInfo(cam).canLock) return;
+  sweep = { i: 0, stop: false };
+  recFiles = null; recMsg = '';
+  if (recorder.state !== 'recording') toggleRecording();
+  if (recorder.state !== 'recording') { sweep = null; return; }
+  try {
+    for (let i = 0; i < SWEEP.length && !sweep.stop && state.cam === cam && recorder.state === 'recording'; i++) {
+      sweep.i = i;
+      const step = SWEEP[i];
+      try {
+        await setExposure(cam, step == null ? { mode: 'continuous' } : { mode: 'manual', time: step });
+        trace.event(performance.now(), step == null ? 'exposition : auto' : `exposition : ${(step / 10).toFixed(1)} ms demandées`);
+      } catch (err) { trace.event(performance.now(), `exposition : refusée (${err?.message || err})`); }
+      const until = performance.now() + (i === 0 ? SWEEP_FIRST_MS : SWEEP_STEP_MS);
+      while (performance.now() < until && !sweep.stop && recorder.state === 'recording') await sleep(100);
+    }
+  } finally {
+    try { await setExposure(cam, { mode: 'continuous' }); trace.event(performance.now(), 'exposition : auto (fin du balayage)'); } catch { /* the camera stopped */ }
+    $('lockExposure').classList.remove('on'); $('lockExposure').textContent = 'Verrouiller l\'exposition';
+    sweep = null;
+    if (recorder.state === 'recording') recorder.stop();
+  }
+}
+$('sweep').onclick = toggleSweep;
 $('rec').onclick = toggleRecording;
 $('recShare').onclick = async () => {
   if (!recFiles) return;
@@ -675,6 +739,7 @@ function report() {
     `changements de la caméra et de l'écran: ${camWatch.line()}`,
     `caméra, capacités: ${capabilitiesText(state.cam && state.cam.capabilities)} ; orientation de l'écran: ${(screen.orientation && screen.orientation.type) || 'n/d'} ; réglages: ${(() => { try { return JSON.stringify(pickSettings(state.cam && state.cam.track && state.cam.track.getSettings && state.cam.track.getSettings())); } catch { return 'n/d'; } })()}`,
     `enregistrement de la caméra: ${recorder.line()}`,
+    `image affichée: ${lighten.on ? `éclaircie quand elle est sombre (courbe ${lighten.gamma.toFixed(1)} maintenant, luminosité moyenne de l'image ${Number.isFinite(lighten.mean) ? (100 * lighten.mean).toFixed(0) : 'n/d'} %, éclaircie dans ${trackLog.pictures ? Math.round((100 * lighten.count) / trackLog.pictures) : 0} % des images ; l'analyse lit l'image d'origine)` : 'telle que la caméra la donne (?lighten=0)'}`,
     `requestVideoFrameCallback: ${typeof HTMLVideoElement !== 'undefined' && 'requestVideoFrameCallback' in HTMLVideoElement.prototype ? 'oui' : 'non'}`,
     `Web Bluetooth: ${'bluetooth' in navigator ? 'oui' : 'non'}`,
     `détection: ${state.detect === 'track' ? `par suivi d'une carte du plan (différence de deux images, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${isDual(state.group, state.circle) ? ' dans le même flash, les deux flashs en alternance' : lineOn() && squareOn() ? ' en alternance' : ''}, seuils ${state.blinkThreshold}/${state.ringThreshold} pour l'acquisition)` : state.detect === 'diff' ? `par différence de deux images (écart de 0,4 à 1,6 demi-période, ${blinkHz().toFixed(2)} Hz, ${groupLabel(state.group)} + ${circleLabel(state.circle)}${lineOn() && squareOn() ? ' en alternance' : ''}, seuil ${state.blinkThreshold}, source ${pdiff.source ?? 'n/d'}/${pdiffAmber.source ?? 'n/d'})` : state.detect === 'blink' ? `par clignotement sur ${lock.windowMs} ms (${blinkHz().toFixed(2)} Hz, fenêtre ${lock.windowMs} ms = ${lock.K} images, ${groupLabel(state.group)}, signal ${state.signal === 'color' ? 'couleur' : 'toute variation'}, seuil ${state.blinkThreshold})` : `par luminosité (seuil ${state.threshold}, contraste local ${state.contrast}, couleur ${state.color === 'all' ? 'toutes' : state.color})`}, analyse ${canvas.width}x${canvas.height}, masque ${state.mask ? 'oui' : 'non'}`,
@@ -788,6 +853,7 @@ async function toggleExposure() {
       await setExposure(cam, { mode: 'manual', ...(Number.isFinite(before.currentTime) ? { time: before.currentTime } : {}) });
       lock.classList.add('on');
       lock.textContent = 'Exposition verrouillée (cliquer pour libérer)';
+      trace.event(performance.now(), `exposition : verrouillée (temps lu ${Number.isFinite(before.currentTime) ? (before.currentTime / 10).toFixed(1) + ' ms' : 'n/d'})`);
       const e = exposureInfo(cam);
       if (e.time) {
         slider.min = e.time.min; slider.max = e.time.max; slider.step = e.time.step || 1;
@@ -797,6 +863,7 @@ async function toggleExposure() {
       }
     } else {
       await setExposure(cam, { mode: 'continuous' });
+      trace.event(performance.now(), 'exposition : auto');
       lock.classList.remove('on');
       lock.textContent = 'Verrouiller l\'exposition';
       slider.style.display = $('exposureLabel').style.display = 'none';
@@ -912,6 +979,7 @@ $('shortExposure').onclick = async () => {
   try {
     const t = e.time ? Math.min(e.time.max, Math.max(e.time.min, 40)) : 40;          // 4 ms, in units of 0.1 ms
     await setExposure(cam, { mode: 'manual', time: t });
+    trace.event(performance.now(), `exposition : ${(t / 10).toFixed(1)} ms demandées`);
     lock.classList.add('on');
     lock.textContent = 'Exposition verrouillée (cliquer pour libérer)';
     if (e.time) { slider.min = e.time.min; slider.max = e.time.max; slider.step = e.time.step || 1; slider.value = t; slider.style.display = $('exposureLabel').style.display = ''; $('exposureValue').textContent = `${(t / 10).toFixed(1)} ms`; }
@@ -957,7 +1025,7 @@ $('procSize').onchange = (e) => {
 $('resetAngles').onclick = resetAngles;
 $('exposureTime').oninput = async (e) => {
   $('exposureValue').textContent = `${(e.target.value / 10).toFixed(1)} ms`;
-  try { await setExposure(state.cam, { time: +e.target.value }); } catch (err) { $('exposureNote').textContent = String(err?.message || err); }
+  try { await setExposure(state.cam, { time: +e.target.value }); trace.event(performance.now(), `exposition : ${(e.target.value / 10).toFixed(1)} ms demandées`); } catch (err) { $('exposureNote').textContent = String(err?.message || err); }
 };
 $('copy').onclick = async () => {
   const text = report();

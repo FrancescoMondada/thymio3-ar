@@ -39,3 +39,15 @@ test('a map that leaps across the picture is a jump (the circle going off in str
 });
 
 test('an empty trace says so', () => { assert.deepEqual(figures([]), { pictures: 0 }); });
+
+import { exposureSegments, slice } from '../src/figures.js';
+
+test('the exposure sweep cuts the rows into one slice per step, without the first second after each change', () => {
+  const events = [[500, '- -> t'], [1000, 'exposition : auto'], [6000, 'exposition : 1.0 ms demandées'], [10000, 'exposition : 2.0 ms demandées']];
+  const seg = exposureSegments(events, 14000);
+  assert.deepEqual(seg.map((s) => [s.label, s.from, s.to]), [['auto', 2000, 6000], ['1.0 ms demandées', 7000, 10000], ['2.0 ms demandées', 11000, 14000]]);
+  const rows = [];
+  for (let ms = 0; ms < 14000; ms += 100) rows.push([ms, 't', 0.5, 0.5, 1, 4, 4, 0, null, 270, 480]);
+  assert.equal(slice(rows, seg[0].from, seg[0].to).length, 40);
+  assert.equal(slice(rows, 20000, 30000).length, 0);
+});

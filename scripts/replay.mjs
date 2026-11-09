@@ -10,7 +10,7 @@ import { readFileSync, mkdtempSync, copyFileSync, existsSync, mkdirSync } from '
 import { tmpdir } from 'node:os';
 import { basename, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { figures } from '../src/figures.js';
+import { figures, exposureSegments, slice } from '../src/figures.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -66,4 +66,13 @@ if (livePath && existsSync(livePath)) {
   const t = readFileSync(livePath, 'utf8');
   const j = JSON.parse(t.slice(t.indexOf('TRACE ') + 6));
   show('en direct', figures(j.rows, j.events));
+  // an exposure sweep: one line per step, replay beside the live run
+  const segs = exposureSegments(j.events, j.rows.length ? j.rows[j.rows.length - 1][0] : 0);
+  if (segs.length) {
+    console.log('\npar exposition (la première seconde après chaque changement est laissée de côté) : images · carte · 3+3 confirmés');
+    for (const sg of segs) {
+      const r = figures(slice(data.rows, sg.from, sg.to)), l = figures(slice(j.rows, sg.from, sg.to));
+      console.log(`  ${sg.label.padEnd(22)} rejoué ${r.pictures ? `${r.pictures} · ${r.mapPct} % · ${r.confirmedPct} %` : 'rien'}   en direct ${l.pictures ? `${l.pictures} · ${l.mapPct} % · ${l.confirmedPct} %` : 'rien'}`);
+    }
+  }
 }
